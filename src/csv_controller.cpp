@@ -4,6 +4,7 @@
 #include "csv_view.h"
 
 #include <cctype>
+#include <optional>
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 
@@ -21,13 +22,15 @@ CSVController::CSVController(CSVModel &model, CSVView &view)
                                 if (!search_buffer_.empty()) {
                                   auto match = model_.FindNext(search_buffer_, start_row_);
                                   if (match) {
-                                    start_row_ = *match;
+                                    start_row_ = match->row;
                                     UpdateViewport();
                                     last_search_ = search_buffer_;
                                     last_command_ = "/" + search_buffer_;
                                     view_.SetSearchPattern(search_buffer_);
+                                    SetCurrentMatch(match->row, match->col);
                                   } else {
                                     last_command_ = "/" + search_buffer_ + " (not found)";
+                                    ClearCurrentMatch();
                                   }
                                 }
                                 search_mode_ = false;
@@ -40,6 +43,7 @@ CSVController::CSVController(CSVModel &model, CSVView &view)
                                 search_buffer_.clear();
                                 command_buffer_.clear();
                                 view_.SetCommandLine(command_buffer_, last_command_);
+                                ClearCurrentMatch();
                                 return true;
                               }
                               if (event == Event::Backspace) {
@@ -175,12 +179,14 @@ CSVController::CSVController(CSVModel &model, CSVView &view)
                                 size_t start = start_row_ + 1;
                                 auto match = model_.FindNext(*last_search_, start);
                                 if (match) {
-                                  start_row_ = *match;
+                                  start_row_ = match->row;
                                   UpdateViewport();
                                   last_command_ = "n";
                                   view_.SetSearchPattern(*last_search_);
+                                  SetCurrentMatch(match->row, match->col);
                                 } else {
                                   last_command_ = "n (not found)";
+                                  ClearCurrentMatch();
                                 }
                                 command_buffer_.clear();
                                 view_.SetCommandLine(command_buffer_, last_command_);
@@ -191,12 +197,14 @@ CSVController::CSVController(CSVModel &model, CSVView &view)
                                 size_t start = start_row_ == 0 ? 0 : start_row_ - 1;
                                 auto match = model_.FindPrev(*last_search_, start);
                                 if (match) {
-                                  start_row_ = *match;
+                                  start_row_ = match->row;
                                   UpdateViewport();
                                   last_command_ = "N";
                                   view_.SetSearchPattern(*last_search_);
+                                  SetCurrentMatch(match->row, match->col);
                                 } else {
                                   last_command_ = "N (not found)";
+                                  ClearCurrentMatch();
                                 }
                                 command_buffer_.clear();
                                 view_.SetCommandLine(command_buffer_, last_command_);
@@ -215,6 +223,7 @@ ftxui::Component CSVController::GetComponent() { return container_; }
 
 void CSVController::UpdateViewport() {
   model_.SetViewport(start_row_, visible_rows_);
+  view_.SetStartRow(start_row_);
 }
 
 void CSVController::MoveRows(int delta) {
@@ -250,4 +259,17 @@ void CSVController::GoToLine(size_t target) {
   // Align viewport so that target row is at the top if possible.
   start_row_ = row_index;
   UpdateViewport();
+}
+
+void CSVController::SetCurrentMatch(std::optional<size_t> row,
+                                    std::optional<size_t> col) {
+  current_match_row_ = row;
+  current_match_col_ = col;
+  view_.SetCurrentMatch(row, col);
+}
+
+void CSVController::ClearCurrentMatch() {
+  current_match_row_.reset();
+  current_match_col_.reset();
+  view_.SetCurrentMatch(std::nullopt, std::nullopt);
 }

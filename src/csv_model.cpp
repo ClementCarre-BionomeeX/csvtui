@@ -240,8 +240,8 @@ size_t CSVModel::ComputeRowCount() {
   return row_count_;
 }
 
-std::optional<size_t> CSVModel::FindNext(const std::string &pattern,
-                                         size_t start_row) {
+std::optional<CSVModel::SearchHit>
+CSVModel::FindNext(const std::string &pattern, size_t start_row) {
   if (!file_.is_open() || pattern.empty())
     return std::nullopt;
 
@@ -256,8 +256,11 @@ std::optional<size_t> CSVModel::FindNext(const std::string &pattern,
       break;
     const auto &chunk = it->second;
     for (size_t i = row % chunk_size_; i < chunk.size(); ++i) {
-      if (RowMatches(chunk[i], pattern))
-        return chunk_idx * chunk_size_ + i;
+      for (size_t col = 0; col < chunk[i].size(); ++col) {
+        auto pos = chunk[i][col].find(pattern);
+        if (pos != std::string::npos)
+          return SearchHit{chunk_idx * chunk_size_ + i, col, pos};
+      }
       ++row;
     }
     // If we've reached the known end and didn't find it, stop.
@@ -273,8 +276,8 @@ std::optional<size_t> CSVModel::FindNext(const std::string &pattern,
   return std::nullopt;
 }
 
-std::optional<size_t> CSVModel::FindPrev(const std::string &pattern,
-                                         size_t start_row) {
+std::optional<CSVModel::SearchHit>
+CSVModel::FindPrev(const std::string &pattern, size_t start_row) {
   if (!file_.is_open() || pattern.empty())
     return std::nullopt;
 
@@ -300,8 +303,11 @@ std::optional<size_t> CSVModel::FindPrev(const std::string &pattern,
     for (size_t i = idx_in_chunk + 1; i-- > 0;) {
       if (i >= chunk.size())
         continue;
-      if (RowMatches(chunk[i], pattern))
-        return chunk_idx * chunk_size_ + i;
+      for (size_t col = 0; col < chunk[i].size(); ++col) {
+        auto pos = chunk[i][col].rfind(pattern);
+        if (pos != std::string::npos)
+          return SearchHit{chunk_idx * chunk_size_ + i, col, pos};
+      }
       if (chunk_idx == 0 && i == 0)
         return std::nullopt;
     }
@@ -311,13 +317,4 @@ std::optional<size_t> CSVModel::FindPrev(const std::string &pattern,
   }
 
   return std::nullopt;
-}
-
-bool CSVModel::RowMatches(const std::vector<std::string> &row,
-                          const std::string &pattern) const {
-  for (const auto &col : row) {
-    if (col.find(pattern) != std::string::npos)
-      return true;
-  }
-  return false;
 }

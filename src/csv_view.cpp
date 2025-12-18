@@ -54,12 +54,18 @@ Component CSVView::Render() {
 
   if (header_pinned_ && has_header)
     rendered_rows.push_back(
-        FormatRow(header, column_widths, true, column_offset_, available_width));
+        FormatRow(header, column_widths, true, std::nullopt, column_offset_,
+                  available_width));
 
   for (size_t i = 0; i < rows.size(); ++i) {
     const bool is_header_row = header_in_rows && !header_pinned_ && i == 0;
+    std::optional<size_t> row_index = std::nullopt;
+    if (!is_header_row) {
+      size_t data_idx = (header_in_rows && !header_pinned_) ? i - 1 : i;
+      row_index = start_row_base_ + data_idx;
+    }
     rendered_rows.push_back(FormatRow(rows[i], column_widths, is_header_row,
-                                      column_offset_, available_width));
+                                      row_index, column_offset_, available_width));
   }
 
   auto status_line =
@@ -122,6 +128,7 @@ CSVView::MaxColumns(const std::vector<std::vector<std::string>> &rows) const {
 Element CSVView::FormatRow(const std::vector<std::string> &row,
                            const std::vector<size_t> &column_widths,
                            bool is_header,
+                           std::optional<size_t> row_index,
                            size_t start_col,
                            int available_width) {
   std::vector<Element> cells;
@@ -132,18 +139,39 @@ Element CSVView::FormatRow(const std::vector<std::string> &row,
     size_t width = (tabular_mode_ && i < column_widths.size())
                        ? column_widths[i]
                        : value.size();
-    value.resize(width, ' '); // pad to width
-    value += ";";
-    int cell_width = static_cast<int>(value.size());
+    int cell_width = static_cast<int>(width + 1); // + ';'
     if (!cells.empty() && used_width + cell_width > available_width)
       break;
     used_width += cell_width;
-    Element cell =
-        text(value) | color(column_colors_[i % column_colors_.size()]);
-    if (!search_pattern_.empty() &&
-        row[i].find(search_pattern_) != std::string::npos) {
-      cell |= bgcolor(Color::Yellow);
+    std::vector<Element> segments;
+    if (!search_pattern_.empty()) {
+      auto pos = value.find(search_pattern_);
+      if (pos != std::string::npos) {
+        std::string pre = value.substr(0, pos);
+        std::string mid = value.substr(pos, search_pattern_.size());
+        std::string post = value.substr(pos + search_pattern_.size());
+        if (!pre.empty())
+          segments.push_back(text(pre));
+        bool is_current = row_index && current_match_row_ &&
+                          current_match_col_ && *row_index == *current_match_row_ &&
+                          i == *current_match_col_;
+        auto hl = is_current ? bgcolor(Color::RedLight) : bgcolor(Color::Yellow);
+        segments.push_back(text(mid) | hl);
+        if (!post.empty())
+          segments.push_back(text(post));
+      } else {
+        segments.push_back(text(value));
+      }
+    } else {
+      segments.push_back(text(value));
     }
+    int pad = static_cast<int>(width - value.size());
+    if (pad > 0)
+      segments.push_back(text(std::string(pad, ' ')));
+    segments.push_back(text(";"));
+
+    Element cell = hbox(std::move(segments)) |
+                   color(column_colors_[i % column_colors_.size()]);
     if (is_header)
       cell |= bold;
 
@@ -161,4 +189,12 @@ void CSVView::SetCommandLine(const std::string &current,
 
 void CSVView::SetSearchPattern(const std::string &pattern) {
   search_pattern_ = pattern;
+}
+
+void CSVView::SetStartRow(size_t start_row) { start_row_base_ = start_row; }
+
+void CSVView::SetCurrentMatch(std::optional<size_t> row,
+                              std::optional<size_t> col) {
+  current_match_row_ = row;
+  current_match_col_ = col;
 }

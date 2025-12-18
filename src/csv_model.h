@@ -9,6 +9,11 @@
 class CSVModel {
 public:
   CSVModel();
+  struct SearchHit {
+    size_t row;
+    size_t col;
+    size_t pos;
+  };
 
   bool Open(const std::string &path);
   void Close();
@@ -21,7 +26,8 @@ public:
   bool is_open() const { return file_.is_open(); }
   size_t RowCount();
   bool RowCountKnown() const { return row_count_known_; }
-  std::optional<size_t> FindNext(const std::string &pattern, size_t start_row);
+  std::optional<SearchHit> FindNext(const std::string &pattern, size_t start_row);
+  std::optional<SearchHit> FindPrev(const std::string &pattern, size_t start_row);
   std::optional<size_t> FindPrev(const std::string &pattern, size_t start_row);
 
 private:
@@ -52,6 +58,4 @@ private:
   std::streampos ResolveOffset(size_t chunk_idx);
   void EnsureOffsetsUpTo(size_t chunk_idx);
   size_t ComputeRowCount();
-  bool RowMatches(const std::vector<std::string> &row,
-                  const std::string &pattern) const;
 };

@@ -30,8 +30,12 @@ private:
   bool search_mode_ = false;
   std::string search_buffer_;
   std::optional<std::string> last_search_;
+  std::optional<size_t> current_match_row_;
+  std::optional<size_t> current_match_col_;
 
   void UpdateViewport();
   void MoveRows(int delta);
   void GoToLine(size_t target);
+  void SetCurrentMatch(std::optional<size_t> row, std::optional<size_t> col);
+  void ClearCurrentMatch();
 };
