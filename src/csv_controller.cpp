@@ -54,10 +54,9 @@ CSVController::CSVController(CSVModel &model, CSVView &view)
                               view_.SetCommandLine(command_buffer_, last_command_);
                               return true;
                             } else if (event == Event::Character('G')) {
-                              bool to_end = pending_count_ == 0;
-                              size_t target = to_end ? model_.RowCount()
-                                                     : pending_count_;
-                              GoToLine(target == 0 ? 1 : target, to_end);
+                              size_t target = pending_count_ == 0 ? model_.RowCount()
+                                                                   : pending_count_;
+                              GoToLine(target == 0 ? 1 : target);
                               last_command_ =
                                   (pending_count_ == 0
                                        ? std::string("G")
@@ -132,23 +131,19 @@ CSVController::CSVController(CSVModel &model, CSVView &view)
 
 ftxui::Component CSVController::GetComponent() { return container_; }
 
-void CSVController::UpdateViewport(bool read_to_end) {
-  model_.SetViewport(start_row_, visible_rows_, read_to_end);
+void CSVController::UpdateViewport() {
+  model_.SetViewport(start_row_, visible_rows_);
 }
 
 void CSVController::MoveRows(int delta) {
   const size_t row_count = model_.RowCount();
-  const bool count_known = model_.RowCountKnown();
   if (delta == 0)
     return;
   if (delta > 0) {
+    size_t max_start = row_count > visible_rows_ ? row_count - visible_rows_ : 0;
     size_t next = start_row_ + static_cast<size_t>(delta);
-    if (count_known) {
-      size_t max_start =
-          row_count > visible_rows_ ? row_count - visible_rows_ : 0;
-      if (next > max_start)
-        next = max_start;
-    }
+    if (next > max_start)
+      next = max_start;
     start_row_ = next;
   } else {
     size_t abs_delta = static_cast<size_t>(-delta);
@@ -159,25 +154,16 @@ void CSVController::MoveRows(int delta) {
   }
 }
 
-void CSVController::GoToLine(size_t target, bool to_end) {
+void CSVController::GoToLine(size_t target) {
   // target is 1-based from the user's perspective.
   if (target == 0)
     target = 1;
   size_t row_index = target - 1;
   size_t row_count = model_.RowCount();
-  const bool count_known = model_.RowCountKnown();
-  bool request_end = false;
+  if (row_index >= row_count)
+    row_index = row_count == 0 ? 0 : row_count - 1;
 
-  if (to_end) {
-    request_end = true;
-  } else if (count_known) {
-    if (row_index >= row_count)
-      row_index = row_count == 0 ? 0 : row_count - 1;
-  } else if (target == row_count) {
-    // G with unknown size: request a scan to the end.
-    request_end = true;
-  }
-
+  // Align viewport so that target row is at the top if possible.
   start_row_ = row_index;
-  UpdateViewport(request_end);
+  UpdateViewport();
 }

@@ -27,7 +27,7 @@ private:
   std::string command_buffer_;
   std::string last_command_;
 
-  void UpdateViewport(bool read_to_end = false);
+  void UpdateViewport();
   void MoveRows(int delta);
-  void GoToLine(size_t target, bool to_end = false);
+  void GoToLine(size_t target);
 };
