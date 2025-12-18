@@ -28,7 +28,6 @@ public:
   bool RowCountKnown() const { return row_count_known_; }
   std::optional<SearchHit> FindNext(const std::string &pattern, size_t start_row);
   std::optional<SearchHit> FindPrev(const std::string &pattern, size_t start_row);
-  std::optional<size_t> FindPrev(const std::string &pattern, size_t start_row);
 
 private:
   std::ifstream file_;
