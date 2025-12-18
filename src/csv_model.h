@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <optional>
 
 class CSVModel {
 public:
@@ -21,6 +22,7 @@ public:
   bool is_open() const { return file_.is_open(); }
   size_t RowCount();
   bool RowCountKnown() const { return row_count_known_; }
+  std::optional<size_t> FindNext(const std::string &pattern, size_t start_row);
 
 private:
   std::ifstream file_;
@@ -50,4 +52,6 @@ private:
   std::streampos ResolveOffset(size_t chunk_idx);
   void EnsureOffsetsUpTo(size_t chunk_idx);
   size_t ComputeRowCount();
+  bool RowMatches(const std::vector<std::string> &row,
+                  const std::string &pattern) const;
 };

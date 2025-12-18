@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <iostream>
 #include <sstream>
+#include <optional>
 
 CSVModel::CSVModel() {}
 
@@ -237,4 +238,46 @@ size_t CSVModel::ComputeRowCount() {
   row_count_ = rows;
   last_known_row_ = rows;
   return row_count_;
+}
+
+std::optional<size_t> CSVModel::FindNext(const std::string &pattern,
+                                         size_t start_row) {
+  if (!file_.is_open() || pattern.empty())
+    return std::nullopt;
+
+  const size_t total_rows = RowCountKnown() ? RowCount() : last_known_row_;
+  size_t row = start_row;
+  while (true) {
+    size_t chunk_idx = row / chunk_size_;
+    if (!LoadChunk(chunk_idx))
+      break;
+    auto it = chunk_cache_.find(chunk_idx);
+    if (it == chunk_cache_.end())
+      break;
+    const auto &chunk = it->second;
+    for (size_t i = row % chunk_size_; i < chunk.size(); ++i) {
+      if (RowMatches(chunk[i], pattern))
+        return chunk_idx * chunk_size_ + i;
+      ++row;
+    }
+    // If we've reached the known end and didn't find it, stop.
+    if (RowCountKnown() && row >= RowCount())
+      break;
+  }
+
+  // If we didn't know the total and didn't find it, finish scanning to end once.
+  if (!RowCountKnown()) {
+    ComputeRowCount();
+  }
+
+  return std::nullopt;
+}
+
+bool CSVModel::RowMatches(const std::vector<std::string> &row,
+                          const std::string &pattern) const {
+  for (const auto &col : row) {
+    if (col.find(pattern) != std::string::npos)
+      return true;
+  }
+  return false;
 }

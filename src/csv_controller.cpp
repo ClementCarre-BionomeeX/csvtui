@@ -16,6 +16,49 @@ CSVController::CSVController(CSVModel &model, CSVView &view)
 
   container_ = CatchEvent(Renderer([this] { return view_.Render()->Render(); }),
                           [&](Event event) {
+                            if (search_mode_) {
+                              if (event == Event::Return) {
+                                if (!search_buffer_.empty()) {
+                                  auto match = model_.FindNext(search_buffer_, start_row_);
+                                  if (match) {
+                                    start_row_ = *match;
+                                    UpdateViewport();
+                                    last_search_ = search_buffer_;
+                                    last_command_ = "/" + search_buffer_;
+                                  } else {
+                                    last_command_ = "/" + search_buffer_ + " (not found)";
+                                  }
+                                }
+                                search_mode_ = false;
+                                command_buffer_.clear();
+                                view_.SetCommandLine(command_buffer_, last_command_);
+                                return true;
+                              }
+                              if (event == Event::Escape) {
+                                search_mode_ = false;
+                                search_buffer_.clear();
+                                command_buffer_.clear();
+                                view_.SetCommandLine(command_buffer_, last_command_);
+                                return true;
+                              }
+                              if (event == Event::Backspace) {
+                                if (!search_buffer_.empty()) {
+                                  search_buffer_.pop_back();
+                                  command_buffer_.pop_back();
+                                  view_.SetCommandLine(command_buffer_, last_command_);
+                                }
+                                return true;
+                              }
+                              if (event.is_character()) {
+                                char ch = event.character()[0];
+                                search_buffer_.push_back(ch);
+                                command_buffer_.push_back(ch);
+                                view_.SetCommandLine(command_buffer_, last_command_);
+                                return true;
+                              }
+                              return false;
+                            }
+
                             // Accumulate numeric prefix for vim-like motions.
                             if (event.is_character()) {
                               const auto ch = event.character()[0];
@@ -23,6 +66,12 @@ CSVController::CSVController(CSVModel &model, CSVView &view)
                                 pending_count_ = pending_count_ * 10 + (ch - '0');
                                 awaiting_second_g_ = false;
                                 command_buffer_.push_back(ch);
+                                view_.SetCommandLine(command_buffer_, last_command_);
+                                return true;
+                              } else if (ch == '/') {
+                                search_mode_ = true;
+                                search_buffer_.clear();
+                                command_buffer_ = "/";
                                 view_.SetCommandLine(command_buffer_, last_command_);
                                 return true;
                               }
@@ -120,6 +169,21 @@ CSVController::CSVController(CSVModel &model, CSVView &view)
                               command_buffer_.clear();
                               view_.SetCommandLine(command_buffer_, last_command_);
                               return true;
+                            } else if (event == Event::Character('n')) {
+                              if (last_search_) {
+                                size_t start = start_row_ + 1;
+                                auto match = model_.FindNext(*last_search_, start);
+                                if (match) {
+                                  start_row_ = *match;
+                                  UpdateViewport();
+                                  last_command_ = "n";
+                                } else {
+                                  last_command_ = "n (not found)";
+                                }
+                                command_buffer_.clear();
+                                view_.SetCommandLine(command_buffer_, last_command_);
+                                return true;
+                              }
                             }
                             awaiting_second_g_ = false;
                             pending_count_ = 0;

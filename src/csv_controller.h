@@ -26,6 +26,9 @@ private:
   bool awaiting_second_g_ = false;
   std::string command_buffer_;
   std::string last_command_;
+  bool search_mode_ = false;
+  std::string search_buffer_;
+  std::optional<std::string> last_search_;
 
   void UpdateViewport();
   void MoveRows(int delta);
