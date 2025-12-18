@@ -136,13 +136,15 @@ void CSVController::UpdateViewport() {
 }
 
 void CSVController::MoveRows(int delta) {
-  const size_t row_count = model_.RowCount();
+  const bool count_known = model_.RowCountKnown();
+  const size_t row_count = count_known ? model_.RowCount() : 0;
   if (delta == 0)
     return;
   if (delta > 0) {
-    size_t max_start = row_count > visible_rows_ ? row_count - visible_rows_ : 0;
+    size_t max_start =
+        count_known && row_count > visible_rows_ ? row_count - visible_rows_ : row_count;
     size_t next = start_row_ + static_cast<size_t>(delta);
-    if (next > max_start)
+    if (count_known && next > max_start)
       next = max_start;
     start_row_ = next;
   } else {
