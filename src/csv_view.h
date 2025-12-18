@@ -18,6 +18,7 @@ public:
   void ToggleTabularMode();
   void AdjustColumnOffset(int delta);
   void SetCommandLine(const std::string &current, const std::string &last);
+  void SetSearchPattern(const std::string &pattern);
 
 private:
   CSVModel &model_;
@@ -26,6 +27,7 @@ private:
   size_t column_offset_ = 0;
   std::string current_command_;
   std::string last_command_;
+  std::string search_pattern_;
 
   std::vector<ftxui::Color> column_colors_;
   void InitColumnColors(size_t count);

@@ -25,6 +25,7 @@ CSVController::CSVController(CSVModel &model, CSVView &view)
                                     UpdateViewport();
                                     last_search_ = search_buffer_;
                                     last_command_ = "/" + search_buffer_;
+                                    view_.SetSearchPattern(search_buffer_);
                                   } else {
                                     last_command_ = "/" + search_buffer_ + " (not found)";
                                   }
@@ -177,8 +178,25 @@ CSVController::CSVController(CSVModel &model, CSVView &view)
                                   start_row_ = *match;
                                   UpdateViewport();
                                   last_command_ = "n";
+                                  view_.SetSearchPattern(*last_search_);
                                 } else {
                                   last_command_ = "n (not found)";
+                                }
+                                command_buffer_.clear();
+                                view_.SetCommandLine(command_buffer_, last_command_);
+                                return true;
+                              }
+                            } else if (event == Event::Character('N')) {
+                              if (last_search_) {
+                                size_t start = start_row_ == 0 ? 0 : start_row_ - 1;
+                                auto match = model_.FindPrev(*last_search_, start);
+                                if (match) {
+                                  start_row_ = *match;
+                                  UpdateViewport();
+                                  last_command_ = "N";
+                                  view_.SetSearchPattern(*last_search_);
+                                } else {
+                                  last_command_ = "N (not found)";
                                 }
                                 command_buffer_.clear();
                                 view_.SetCommandLine(command_buffer_, last_command_);

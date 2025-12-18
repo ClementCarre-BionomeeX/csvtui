@@ -273,6 +273,46 @@ std::optional<size_t> CSVModel::FindNext(const std::string &pattern,
   return std::nullopt;
 }
 
+std::optional<size_t> CSVModel::FindPrev(const std::string &pattern,
+                                         size_t start_row) {
+  if (!file_.is_open() || pattern.empty())
+    return std::nullopt;
+
+  size_t row = start_row;
+  if (!RowCountKnown()) {
+    ComputeRowCount();
+  }
+  size_t total = RowCount();
+  if (total == 0)
+    return std::nullopt;
+  if (row >= total)
+    row = total - 1;
+
+  while (true) {
+    size_t chunk_idx = row / chunk_size_;
+    if (!LoadChunk(chunk_idx))
+      break;
+    auto it = chunk_cache_.find(chunk_idx);
+    if (it == chunk_cache_.end())
+      break;
+    const auto &chunk = it->second;
+    size_t idx_in_chunk = row % chunk_size_;
+    for (size_t i = idx_in_chunk + 1; i-- > 0;) {
+      if (i >= chunk.size())
+        continue;
+      if (RowMatches(chunk[i], pattern))
+        return chunk_idx * chunk_size_ + i;
+      if (chunk_idx == 0 && i == 0)
+        return std::nullopt;
+    }
+    if (chunk_idx == 0)
+      break;
+    row = chunk_idx * chunk_size_ - 1;
+  }
+
+  return std::nullopt;
+}
+
 bool CSVModel::RowMatches(const std::vector<std::string> &row,
                           const std::string &pattern) const {
   for (const auto &col : row) {

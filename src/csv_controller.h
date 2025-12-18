@@ -2,6 +2,7 @@
 #pragma once
 
 #include <ftxui/component/component.hpp>
+#include <optional>
 #include <memory>
 
 class CSVModel;

@@ -140,6 +140,10 @@ Element CSVView::FormatRow(const std::vector<std::string> &row,
     used_width += cell_width;
     Element cell =
         text(value) | color(column_colors_[i % column_colors_.size()]);
+    if (!search_pattern_.empty() &&
+        row[i].find(search_pattern_) != std::string::npos) {
+      cell |= bgcolor(Color::Yellow);
+    }
     if (is_header)
       cell |= bold;
 
@@ -153,4 +157,8 @@ void CSVView::SetCommandLine(const std::string &current,
                              const std::string &last) {
   current_command_ = current;
   last_command_ = last;
+}
+
+void CSVView::SetSearchPattern(const std::string &pattern) {
+  search_pattern_ = pattern;
 }
