@@ -3,10 +3,12 @@
 #include "csv_model.h"
 #include "csv_view.h"
 
+#include <algorithm>
 #include <cctype>
 #include <optional>
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/screen_interactive.hpp>
+#include <ftxui/screen/terminal.hpp>
 
 using namespace ftxui;
 
@@ -222,18 +224,22 @@ CSVController::CSVController(CSVModel &model, CSVView &view)
 ftxui::Component CSVController::GetComponent() { return container_; }
 
 void CSVController::UpdateViewport() {
+  RefreshVisibleRowCount();
   model_.SetViewport(start_row_, visible_rows_);
   view_.SetStartRow(start_row_);
 }
 
 void CSVController::MoveRows(int delta) {
+  RefreshVisibleRowCount();
   const bool count_known = model_.RowCountKnown();
   const size_t row_count = count_known ? model_.RowCount() : 0;
   if (delta == 0)
     return;
   if (delta > 0) {
-    size_t max_start =
-        count_known && row_count > visible_rows_ ? row_count - visible_rows_ : row_count;
+    const size_t max_start = count_known
+                                 ? (row_count > visible_rows_ ? row_count - visible_rows_
+                                                              : 0)
+                                 : row_count;
     size_t next = start_row_ + static_cast<size_t>(delta);
     if (count_known && next > max_start)
       next = max_start;
@@ -248,16 +254,19 @@ void CSVController::MoveRows(int delta) {
 }
 
 void CSVController::GoToLine(size_t target) {
+  RefreshVisibleRowCount();
   // target is 1-based from the user's perspective.
   if (target == 0)
     target = 1;
   size_t row_index = target - 1;
-  size_t row_count = model_.RowCount();
+  const size_t row_count = model_.RowCount();
   if (row_index >= row_count)
     row_index = row_count == 0 ? 0 : row_count - 1;
 
   // Align viewport so that target row is at the top if possible.
-  start_row_ = row_index;
+  const size_t max_start =
+      row_count > visible_rows_ ? row_count - visible_rows_ : 0;
+  start_row_ = std::min(row_index, max_start);
   UpdateViewport();
 }
 
@@ -272,4 +281,22 @@ void CSVController::ClearCurrentMatch() {
   current_match_row_.reset();
   current_match_col_.reset();
   view_.SetCurrentMatch(std::nullopt, std::nullopt);
+}
+
+void CSVController::RefreshVisibleRowCount() {
+  const auto size = ftxui::Terminal::Size();
+  int usable_rows = size.dimy;
+  // Status line consumes one row.
+  usable_rows -= 1;
+  // Border around the table consumes two rows.
+  usable_rows -= 2;
+  // Header row, when shown, consumes one more.
+  const bool has_header = !model_.GetHeader().empty();
+  const bool header_visible = has_header && (view_.IsHeaderPinned() || start_row_ == 0);
+  if (header_visible)
+    usable_rows -= 1;
+
+  if (usable_rows < 1)
+    usable_rows = 1;
+  visible_rows_ = static_cast<size_t>(usable_rows);
 }

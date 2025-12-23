@@ -22,6 +22,7 @@ public:
   void SetSearchPattern(const std::string &pattern);
   void SetStartRow(size_t start_row);
   void SetCurrentMatch(std::optional<size_t> row, std::optional<size_t> col);
+  bool IsHeaderPinned() const { return header_pinned_; }
 
 private:
   CSVModel &model_;

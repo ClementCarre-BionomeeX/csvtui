@@ -21,7 +21,7 @@ private:
 
   // Viewport
   size_t start_row_ = 0;
-  const size_t visible_rows_ = 30; // You can tune this based on terminal size
+  size_t visible_rows_ = 0; // Dynamically sized to the terminal height
 
   size_t pending_count_ = 0;
   bool awaiting_second_g_ = false;
@@ -38,4 +38,5 @@ private:
   void GoToLine(size_t target);
   void SetCurrentMatch(std::optional<size_t> row, std::optional<size_t> col);
   void ClearCurrentMatch();
+  void RefreshVisibleRowCount();
 };
