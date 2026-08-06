@@ -2,6 +2,7 @@
 
 #include "csv_model.h"
 #include "csv_parser.h"
+#include "csv_system.h"
 #include "csv_view.h"
 
 #include <algorithm>
@@ -87,6 +88,7 @@ CSVController::CSVController(CSVModel &model, CSVView &view,
                             // Recomputing here is what keeps the view correct
                             // when the terminal is resized: FTXUI re-renders on
                             // SIGWINCH without delivering a key event.
+                            PollIndexer();
                             ClampToView();
                             SyncView();
                             const auto size = Terminal::Size();
@@ -117,6 +119,22 @@ size_t CSVController::KnownLastRow() {
   return count == 0 ? 0 : count - 1;
 }
 
+size_t CSVController::LastRowBetween(size_t low, size_t high) {
+  // Binary search on existence. Every probe lands within a few chunks of one
+  // we have already resolved, so this never degrades into a full scan the way
+  // asking for the exact row count would.
+  if (!RowExists(low))
+    return low;
+  while (low < high) {
+    const size_t mid = low + (high - low + 1) / 2;
+    if (RowExists(mid))
+      low = mid;
+    else
+      high = mid - 1;
+  }
+  return low;
+}
+
 void CSVController::MoveCursorRows(long long delta) {
   if (delta == 0)
     return;
@@ -126,11 +144,15 @@ void CSVController::MoveCursorRows(long long delta) {
     cursor_row_ = magnitude > cursor_row_ ? 0 : cursor_row_ - magnitude;
   } else {
     const size_t target = cursor_row_ + static_cast<size_t>(delta);
-    // Probing avoids scanning the whole file just to move one row down.
-    if (RowExists(target))
+    if (RowExists(target)) {
       cursor_row_ = target;
-    else
+    } else if (model_.RowCountKnown()) {
       cursor_row_ = KnownLastRow();
+    } else {
+      // The end of the file is somewhere in (cursor, target]; find it with
+      // probes rather than counting every row in the file.
+      cursor_row_ = LastRowBetween(cursor_row_, target);
+    }
   }
   ClampToView();
 }
@@ -144,8 +166,101 @@ void CSVController::MoveCursorColumns(long long delta) {
 }
 
 void CSVController::GoToRow(size_t row) {
-  const size_t last = KnownLastRow();
-  cursor_row_ = std::min(row, last);
+  if (RowExists(row)) {
+    cursor_row_ = row;
+  } else if (model_.RowCountKnown()) {
+    cursor_row_ = KnownLastRow();
+  } else {
+    RequestExactCount(PendingJump::Row, row);
+    return;
+  }
+  ClampToView();
+}
+
+// --- background row count ---------------------------------------------------
+
+void CSVController::RequestExactCount(PendingJump jump, size_t row,
+                                      const std::string &filter) {
+  pending_jump_ = jump;
+  pending_row_ = row;
+  pending_filter_ = filter;
+
+  if (model_.RowCountKnown()) {
+    PollIndexer(); // nothing to scan; apply straight away
+    return;
+  }
+  if (!indexer_.running()) {
+    indexer_.Start(model_.real_path(), model_.DataOffset(), CSVModel::kChunkSize,
+                   model_.FileSize(), [this] {
+                     // Called from the worker thread; waking the loop is the
+                     // only cross-thread interaction.
+                     screen_.PostEvent(ftxui::Event::Custom);
+                   });
+  }
+  SetMessage("counting rows… Esc to cancel");
+}
+
+bool CSVController::CancelIndexing() {
+  if (!indexer_.running())
+    return false;
+  indexer_.Cancel();
+  pending_jump_ = PendingJump::None;
+  SetMessage("counting cancelled", true);
+  return true;
+}
+
+void CSVController::PollIndexer() {
+  if (indexer_.running()) {
+    const int percent = static_cast<int>(indexer_.progress() * 100.0);
+    SetMessage("counting rows… " + std::to_string(percent) + "%  (" +
+               csv::HumanCount(indexer_.rows_seen()) + " so far, Esc to cancel)");
+    return;
+  }
+
+  if (indexer_.state() == CSVIndexer::State::Done) {
+    CSVIndexer::Result result;
+    if (indexer_.Take(result))
+      model_.AdoptIndex(std::move(result.offsets), result.total_rows);
+  } else if (indexer_.state() == CSVIndexer::State::Failed) {
+    indexer_.Join();
+    SetMessage("could not read the file to count its rows", true);
+    pending_jump_ = PendingJump::None;
+    return;
+  }
+
+  if (pending_jump_ == PendingJump::None)
+    return;
+  if (!model_.RowCountKnown())
+    return; // cancelled before finishing
+
+  const PendingJump jump = pending_jump_;
+  const size_t row = pending_row_;
+  const std::string filter = pending_filter_;
+  pending_jump_ = PendingJump::None;
+  pending_filter_.clear();
+
+  switch (jump) {
+  case PendingJump::End:
+    cursor_row_ = KnownLastRow();
+    SetMessage(csv::HumanCount(model_.RowCount()) + " rows");
+    break;
+  case PendingJump::Row:
+    cursor_row_ = std::min(row, KnownLastRow());
+    SetMessage(std::string());
+    break;
+  case PendingJump::Sort:
+  case PendingJump::SortDesc:
+    SortByCursorColumn(jump == PendingJump::SortDesc);
+    break;
+  case PendingJump::Filter:
+    ApplyFilter(filter);
+    break;
+  case PendingJump::Stats:
+    ShowColumnStats();
+    break;
+  case PendingJump::None:
+    break;
+  }
   ClampToView();
 }
 
@@ -320,10 +435,19 @@ bool CSVController::OnTextInputEvent(Event event) {
     input_buffer_.clear();
     UpdateCommandLine();
 
-    if (mode == InputMode::Search)
+    if (mode == InputMode::Search) {
       RunSearch(pattern, true, true);
-    else
-      ApplyFilter(pattern);
+    } else if (pattern.empty()) {
+      ApplyFilter(pattern); // clearing never costs anything
+    } else {
+      const std::string blocked = model_.CheckFilterFeasible();
+      if (!blocked.empty())
+        SetMessage(blocked, true);
+      else if (!model_.RowCountKnown())
+        RequestExactCount(PendingJump::Filter, 0, pattern);
+      else
+        ApplyFilter(pattern);
+    }
     return true;
   }
 
@@ -394,6 +518,8 @@ bool CSVController::OnNormalEvent(Event event) {
     return true;
   }
   if (event == Event::Escape) {
+    if (CancelIndexing())
+      return true;
     view_.SetSearch(std::string());
     view_.SetCurrentMatch(std::nullopt, std::nullopt);
     SetMessage(std::string());
@@ -415,11 +541,17 @@ bool CSVController::OnNormalEvent(Event event) {
   }
 
   if (event == Event::Character('G')) {
-    const size_t target =
-        pending_count_ == 0 ? KnownLastRow() : pending_count_ - 1;
+    const size_t count = pending_count_;
     pending_count_ = 0;
     awaiting_second_g_ = false;
-    GoToRow(target);
+    if (count != 0)
+      GoToRow(count - 1);
+    else if (model_.RowCountKnown())
+      GoToRow(KnownLastRow());
+    else
+      // Jumping to the end is the one motion that genuinely needs the row
+      // count, so hand it to the background scan instead of freezing.
+      RequestExactCount(PendingJump::End);
     return true;
   }
 
@@ -478,12 +610,20 @@ bool CSVController::OnNormalEvent(Event event) {
     return true;
   }
 
-  if (event == Event::Character('s')) {
-    SortByCursorColumn(false);
-    return true;
-  }
-  if (event == Event::Character('S')) {
-    SortByCursorColumn(true);
+  if (event == Event::Character('s') || event == Event::Character('S')) {
+    const bool descending = event == Event::Character('S');
+    // Sorting holds an index for every row, so on a very large file it can ask
+    // for more memory than the machine has. Refuse with numbers rather than
+    // letting the allocator take the process down.
+    const std::string blocked = model_.CheckSortFeasible();
+    if (!blocked.empty()) {
+      SetMessage(blocked, true);
+      return true;
+    }
+    if (!model_.RowCountKnown())
+      RequestExactCount(descending ? PendingJump::SortDesc : PendingJump::Sort);
+    else
+      SortByCursorColumn(descending);
     return true;
   }
   if (event == Event::Character('u')) {
@@ -531,7 +671,10 @@ bool CSVController::OnNormalEvent(Event event) {
     return true;
   }
   if (event == Event::Character('c')) {
-    ShowColumnStats();
+    if (!model_.RowCountKnown())
+      RequestExactCount(PendingJump::Stats);
+    else
+      ShowColumnStats();
     return true;
   }
 

@@ -27,15 +27,24 @@ jobs:
         run: ctest --test-dir build --output-on-failure
 
   sanitizers:
-    name: address + undefined sanitizers
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: address + undefined sanitizers
+            flags: "-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+          # The row counter runs on a worker thread, so races are a real risk.
+          - name: thread sanitizer
+            flags: "-fsanitize=thread -g"
     steps:
       - uses: actions/checkout@v4
 
       - name: Configure
         run: >
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+          -DCMAKE_CXX_FLAGS="${{ matrix.flags }}"
 
       - name: Build
         run: cmake --build build -j

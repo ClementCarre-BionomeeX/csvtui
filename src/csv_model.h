@@ -44,7 +44,10 @@ public:
   char delimiter() const { return delimiter_; }
   bool has_header() const { return has_header_; }
   void SetHasHeader(bool value);
+  // Name shown to the user, which is not always the file we read from.
   const std::string &path() const { return display_path_; }
+  // The path actually on disk — always use this to open the file again.
+  const std::string &real_path() const { return real_path_; }
   // Overrides the name shown in the status bar (used for piped input, where
   // the real path is an unhelpful temporary file).
   void SetDisplayName(const std::string &name) { display_path_ = name; }
@@ -85,14 +88,51 @@ public:
   // Physical row count of the file, scanning it fully if needed.
   size_t EnsureTotalRowCount();
 
-private:
+  // --- size estimates, none of which read the file -------------------------
+
+  long long FileSize() const { return file_size_; }
+  std::streampos DataOffset() const { return data_offset_; }
+  // Rows implied by the file size and the average record length seen while
+  // sampling. Exact once the file has been counted.
+  size_t EstimatedRowCount() const;
+  bool RowCountIsExact() const { return total_rows_known_; }
+
+  // Roughly how far into the file a view row sits, as 0..1. Derived from the
+  // nearest known chunk offset, so it costs nothing.
+  double PositionFraction(size_t view_index) const;
+
+  // Peak extra memory these operations would need, from the row estimate.
+  size_t EstimatedSortBytes() const;
+  size_t EstimatedFilterBytes() const;
+
+  // Empty when the operation fits in `available_bytes`, otherwise a sentence
+  // explaining why it was refused. `available_bytes == 0` means "unknown",
+  // which never refuses.
+  std::string CheckSortFeasible(size_t available_bytes) const;
+  std::string CheckFilterFeasible(size_t available_bytes) const;
+  std::string CheckSortFeasible() const;
+  std::string CheckFilterFeasible() const;
+
+  // Replaces the chunk offset table and row count with the results of a scan
+  // performed elsewhere (see CSVIndexer).
+  void AdoptIndex(std::vector<std::streampos> offsets, size_t total_rows);
+
   static constexpr size_t kChunkSize = 512;
+  // Measured on real files: sorting costs ~64 bytes per row (the candidate
+  // list, the extracted keys, and the output permutation), filtering ~10.
+  static constexpr size_t kSortBytesPerRow = 64;
+  static constexpr size_t kFilterBytesPerRow = 10;
+  // Never spend more than this share of what is available.
+  static constexpr double kMemoryBudgetShare = 0.6;
+
+private:
   static constexpr size_t kMaxCachedChunks = 48; // ~24k rows resident
   static constexpr size_t kSampleRows = 1000;
   static constexpr int kMaxSampledWidth = 48;
 
   std::ifstream file_;
   std::string display_path_;
+  std::string real_path_;
   std::streampos data_offset_{0};
   char delimiter_ = ',';
   bool has_header_ = true;
@@ -101,6 +141,8 @@ private:
 
   size_t total_rows_ = 0;
   bool total_rows_known_ = false;
+  long long file_size_ = 0;
+  double average_record_bytes_ = 0.0;
 
   std::vector<std::streampos> chunk_offsets_;
   std::unordered_map<size_t, std::vector<std::vector<std::string>>> chunk_cache_;
@@ -127,4 +169,7 @@ private:
   void SampleColumnMetadata();
   void ResetDerivedState();
   void RebuildOrder();
+  // Samples record lengths at a few points in the file so the row estimate is
+  // not skewed by an unrepresentative head.
+  void RefineAverageRecordBytes();
 };

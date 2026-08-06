@@ -94,10 +94,37 @@ Search is *smart case*: an all-lowercase pattern matches case-insensitively, a
 pattern with any capital matches exactly. Searches wrap around the end of the
 file and say so in the status bar.
 
+## Very large files
+
+csvtui is built for files that other tools refuse to open. Browsing is O(1) in
+the file size: opening a 12 GB export reads about a thousand rows and stops, and
+scrolling stays at a few megabytes of RSS no matter how far you go.
+
+Some things genuinely need to read everything, and csvtui is explicit about them
+rather than freezing:
+
+- **Row counts.** The status bar shows `~6 282 862` — a `~` estimate derived
+  from the file size — until something needs the exact number. `G`, `<n>G` past
+  the end, sorting, filtering and column statistics start a **background count**
+  that reports progress and can be cancelled with `Esc`. The UI stays live
+  throughout. Once counted, the offsets are kept, so every later jump is instant.
+- **Sorting and filtering** hold one index entry per row: roughly 64 bytes per
+  row to sort, 10 to filter. Before starting, csvtui estimates the cost and
+  **refuses if it would not fit in memory**, telling you what it would need:
+
+  ```
+  sorting ~156 000 000 rows needs ~9.3 GB, only 4.2 GB usable — filter first
+  ```
+
+  Set `CSVTUI_MEMORY_LIMIT` (in bytes) to cap what csvtui considers available,
+  which is useful on shared machines.
+
+Searching and scrolling never trigger a count.
+
 ## Notes
 
-Sorting and filtering build an index over the whole file, so both need one full
-pass before the first result appears. Everything else streams.
+Sorting and filtering still make one full pass over the file once started, so on
+a multi-gigabyte file they take a while. They no longer risk exhausting memory.
 
 ## License
 

@@ -1,9 +1,11 @@
 #include "csv_model.h"
 
 #include "csv_parser.h"
+#include "csv_system.h"
 
 #include <algorithm>
 #include <cerrno>
+#include <cmath>
 #include <cstring>
 #include <numeric>
 #include <sys/stat.h>
@@ -20,6 +22,13 @@ bool IsDirectory(const std::string &path) {
 bool PathExists(const std::string &path) {
   struct stat info {};
   return ::stat(path.c_str(), &info) == 0;
+}
+
+long long SizeOf(const std::string &path) {
+  struct stat info {};
+  if (::stat(path.c_str(), &info) != 0)
+    return 0;
+  return static_cast<long long>(info.st_size);
 }
 
 } // namespace
@@ -41,6 +50,8 @@ std::string CSVModel::Open(const std::string &path,
     return "cannot read " + path + ": " + std::strerror(errno);
 
   display_path_ = path;
+  real_path_ = path;
+  file_size_ = SizeOf(path);
 
   std::string first_record;
   if (!csv::ReadRecord(file_, first_record)) {
@@ -70,7 +81,59 @@ std::string CSVModel::Open(const std::string &path,
   chunk_offsets_.push_back(data_offset_);
 
   SampleColumnMetadata();
+  RefineAverageRecordBytes();
   return std::string();
+}
+
+void CSVModel::RefineAverageRecordBytes() {
+  if (total_rows_known_ || file_size_ <= 0 || !file_.is_open())
+    return;
+
+  const long long start = static_cast<long long>(data_offset_);
+  const long long span = file_size_ - start;
+  if (span <= 0)
+    return;
+
+  // The head of a file is often unrepresentative — identifiers are shorter,
+  // optional columns are empty — so probe a few points further in.
+  const double probes[] = {0.25, 0.5, 0.75};
+  double sampled_bytes = 0.0;
+  size_t sampled_records = 0;
+
+  for (double fraction : probes) {
+    const long long at = start + static_cast<long long>(span * fraction);
+    file_.clear();
+    file_.seekg(at);
+    if (!file_)
+      continue;
+
+    std::string discard;
+    if (!std::getline(file_, discard)) // resync onto a record boundary
+      continue;
+
+    const std::streampos begin = file_.tellg();
+    if (begin == std::streampos(-1))
+      continue;
+
+    std::string record;
+    size_t records = 0;
+    while (records < 100 && csv::ReadRecord(file_, record))
+      ++records;
+
+    const std::streampos end = file_.tellg();
+    if (records == 0 || end == std::streampos(-1) || end <= begin)
+      continue;
+    sampled_bytes += static_cast<double>(end) - static_cast<double>(begin);
+    sampled_records += records;
+  }
+
+  if (sampled_records == 0)
+    return;
+
+  const double probed = sampled_bytes / static_cast<double>(sampled_records);
+  average_record_bytes_ = average_record_bytes_ > 0.0
+                              ? (average_record_bytes_ + probed * 3.0) / 4.0
+                              : probed;
 }
 
 void CSVModel::Close() {
@@ -90,6 +153,8 @@ void CSVModel::ResetDerivedState() {
   lru_pos_.clear();
   total_rows_ = 0;
   total_rows_known_ = false;
+  file_size_ = 0;
+  average_record_bytes_ = 0.0;
   column_widths_.clear();
   column_numeric_.clear();
   order_.clear();
@@ -320,10 +385,16 @@ void CSVModel::SampleColumnMetadata() {
   size_t sampled = 0;
   std::vector<size_t> numeric_seen(column_widths_.size(), 0);
 
+  size_t sampled_bytes = 0;
   for (size_t index = 0; index < kSampleRows; ++index) {
     if (!GetPhysicalRow(index, row))
       break;
     ++sampled;
+    // Reconstructed length: fields, separators, and the line terminator. Good
+    // enough to turn a file size into a row estimate without reading it.
+    for (const auto &field : row)
+      sampled_bytes += field.size();
+    sampled_bytes += row.empty() ? 1 : row.size(); // separators + newline
     if (row.size() > column_widths_.size()) {
       column_widths_.resize(row.size(), 0);
       column_numeric_.resize(row.size(), true);
@@ -348,7 +419,127 @@ void CSVModel::SampleColumnMetadata() {
       column_numeric_[col] = false;
   }
   column_count_ = std::max(column_count_, column_widths_.size());
-  (void)sampled;
+
+  // Prefer real byte offsets over reconstructed field lengths: they account
+  // for quoting and line endings exactly. Chunk boundaries give us the byte
+  // position after a known number of rows for free.
+  average_record_bytes_ = 0.0;
+  if (chunk_offsets_.size() >= 2) {
+    const size_t boundary = chunk_offsets_.size() - 1;
+    const long long bytes = static_cast<long long>(chunk_offsets_[boundary]) -
+                            static_cast<long long>(data_offset_);
+    const size_t rows = boundary * kChunkSize;
+    if (bytes > 0 && rows > 0)
+      average_record_bytes_ = static_cast<double>(bytes) / static_cast<double>(rows);
+  }
+  if (average_record_bytes_ <= 0.0 && sampled > 0) {
+    average_record_bytes_ =
+        static_cast<double>(sampled_bytes) / static_cast<double>(sampled);
+  }
+}
+
+// --- estimates --------------------------------------------------------------
+
+size_t CSVModel::EstimatedRowCount() const {
+  if (total_rows_known_)
+    return total_rows_;
+  if (average_record_bytes_ <= 0.0 || file_size_ <= 0)
+    return 0;
+
+  const long long payload =
+      file_size_ - static_cast<long long>(data_offset_);
+  if (payload <= 0)
+    return 0;
+  return static_cast<size_t>(static_cast<double>(payload) / average_record_bytes_);
+}
+
+double CSVModel::PositionFraction(size_t view_index) const {
+  // With a sort or filter in play the byte position is meaningless, so fall
+  // back to the position within the view.
+  if (!order_.empty())
+    return order_.empty() ? 0.0
+                          : static_cast<double>(view_index) /
+                                static_cast<double>(std::max<size_t>(order_.size(), 1));
+
+  if (file_size_ <= 0)
+    return 0.0;
+  if (total_rows_known_ && total_rows_ > 0)
+    return static_cast<double>(view_index) / static_cast<double>(total_rows_);
+
+  // Use the nearest chunk offset we have already resolved: it is an exact byte
+  // position, so this is accurate wherever the user has actually been.
+  const size_t chunk = view_index / kChunkSize;
+  if (chunk < chunk_offsets_.size()) {
+    const double offset = static_cast<double>(chunk_offsets_[chunk]);
+    return std::min(1.0, offset / static_cast<double>(file_size_));
+  }
+
+  const size_t estimate = EstimatedRowCount();
+  if (estimate == 0)
+    return 0.0;
+  return std::min(1.0, static_cast<double>(view_index) /
+                           static_cast<double>(estimate));
+}
+
+size_t CSVModel::EstimatedSortBytes() const {
+  return EstimatedRowCount() * kSortBytesPerRow;
+}
+
+size_t CSVModel::EstimatedFilterBytes() const {
+  return EstimatedRowCount() * kFilterBytesPerRow;
+}
+
+namespace {
+
+std::string RefusalMessage(const char *operation, size_t rows, size_t needed,
+                           size_t budget, size_t available) {
+  (void)available;
+  return std::string(operation) + " ~" + csv::HumanCount(rows) + " rows needs ~" +
+         csv::HumanBytes(needed) + ", only " + csv::HumanBytes(budget) +
+         " usable — filter first";
+}
+
+} // namespace
+
+std::string CSVModel::CheckSortFeasible(size_t available_bytes) const {
+  if (available_bytes == 0)
+    return std::string(); // unknown: do not stand in the user's way
+  const size_t budget =
+      static_cast<size_t>(static_cast<double>(available_bytes) * kMemoryBudgetShare);
+  const size_t needed = EstimatedSortBytes();
+  if (needed <= budget)
+    return std::string();
+  return RefusalMessage("sorting", EstimatedRowCount(), needed, budget,
+                        available_bytes);
+}
+
+std::string CSVModel::CheckFilterFeasible(size_t available_bytes) const {
+  if (available_bytes == 0)
+    return std::string();
+  const size_t budget =
+      static_cast<size_t>(static_cast<double>(available_bytes) * kMemoryBudgetShare);
+  const size_t needed = EstimatedFilterBytes();
+  if (needed <= budget)
+    return std::string();
+  return RefusalMessage("filtering", EstimatedRowCount(), needed, budget,
+                        available_bytes);
+}
+
+std::string CSVModel::CheckSortFeasible() const {
+  return CheckSortFeasible(csv::AvailableMemoryBytes());
+}
+
+std::string CSVModel::CheckFilterFeasible() const {
+  return CheckFilterFeasible(csv::AvailableMemoryBytes());
+}
+
+void CSVModel::AdoptIndex(std::vector<std::streampos> offsets,
+                          size_t total_rows) {
+  if (offsets.empty())
+    return;
+  chunk_offsets_ = std::move(offsets);
+  total_rows_ = total_rows;
+  total_rows_known_ = true;
 }
 
 bool CSVModel::ColumnIsNumeric(size_t col) const {
@@ -370,20 +561,19 @@ CSVModel::FindNext(const std::string &pattern, size_t row, size_t col,
     return std::nullopt;
 
   const bool ci = csv::SmartCaseInsensitive(pattern);
-  const size_t total = RowCount();
-  if (total == 0)
-    return std::nullopt;
+  // Searching walks forward until a row read fails, so it never needs the row
+  // count and therefore never triggers a full scan just to get started.
+  const bool bounded = !order_.empty();
+  const size_t bound = order_.size();
 
   std::vector<std::string> fields;
-  size_t start_col = col + 1;
 
-  for (size_t step = 0; step <= total; ++step) {
-    const size_t current = row + step;
-    if (current >= total)
+  for (size_t current = row;; ++current) {
+    if (bounded && current >= bound)
       break;
     if (!GetRow(current, fields))
       break;
-    for (size_t c = (step == 0 ? start_col : 0); c < fields.size(); ++c) {
+    for (size_t c = (current == row ? col + 1 : 0); c < fields.size(); ++c) {
       const size_t pos = csv::FindFrom(fields[c], pattern, 0, ci);
       if (pos != std::string::npos)
         return SearchHit{current, c, pos, pattern.size()};
@@ -393,7 +583,7 @@ CSVModel::FindNext(const std::string &pattern, size_t row, size_t col,
   if (!wrap)
     return std::nullopt;
 
-  for (size_t current = 0; current <= row && current < total; ++current) {
+  for (size_t current = 0; current <= row; ++current) {
     if (!GetRow(current, fields))
       break;
     for (size_t c = 0; c < fields.size(); ++c) {
@@ -414,11 +604,10 @@ CSVModel::FindPrev(const std::string &pattern, size_t row, size_t col,
     return std::nullopt;
 
   const bool ci = csv::SmartCaseInsensitive(pattern);
-  const size_t total = RowCount();
-  if (total == 0)
-    return std::nullopt;
-  if (row >= total)
-    row = total - 1;
+  // Walking backwards only needs a bound when wrapping round to the end, so
+  // the common case costs no scan.
+  if (!order_.empty() && row >= order_.size())
+    row = order_.empty() ? 0 : order_.size() - 1;
 
   std::vector<std::string> fields;
 
@@ -442,6 +631,12 @@ CSVModel::FindPrev(const std::string &pattern, size_t row, size_t col,
   if (!wrap)
     return std::nullopt;
 
+  // Wrapping backwards is the one search path that needs to know where the end
+  // is; skip it rather than forcing a scan the user did not ask for.
+  if (!RowCountKnown())
+    return std::nullopt;
+
+  const size_t total = RowCount();
   for (size_t current = total; current-- > row;) {
     if (!GetRow(current, fields))
       continue;

@@ -4,6 +4,8 @@
 #include <optional>
 #include <string>
 
+#include "csv_index.h"
+
 namespace ftxui {
 class ScreenInteractive;
 }
@@ -36,6 +38,13 @@ private:
   std::string input_buffer_;
   std::optional<std::string> last_search_;
 
+  // What to do once the background row count finishes.
+  enum class PendingJump { None, End, Row, Sort, SortDesc, Filter, Stats };
+  CSVIndexer indexer_;
+  PendingJump pending_jump_ = PendingJump::None;
+  size_t pending_row_ = 0;
+  std::string pending_filter_;
+
   bool OnEvent(ftxui::Event event);
   bool OnOverlayEvent(ftxui::Event event);
   bool OnTextInputEvent(ftxui::Event event);
@@ -48,6 +57,14 @@ private:
   size_t ConsumeCount();
   bool RowExists(size_t row);
   size_t KnownLastRow();
+  // Last existing row in [low, high], found with probes instead of a scan.
+  size_t LastRowBetween(size_t low, size_t high);
+
+  // Starts (or reuses) the background scan, remembering what to do after.
+  void RequestExactCount(PendingJump jump, size_t row = 0,
+                         const std::string &filter = std::string());
+  void PollIndexer();
+  bool CancelIndexing();
 
   void MoveCursorRows(long long delta);
   void MoveCursorColumns(long long delta);

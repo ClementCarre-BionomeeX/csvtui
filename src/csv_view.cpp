@@ -259,19 +259,22 @@ Element CSVView::RenderStatusBar(int width) {
   };
   std::vector<Segment> segments;
 
+  // The percentage comes from the byte position, so it is available instantly
+  // even on a file whose rows have never been counted.
   const bool known = model_.RowCountKnown();
-  const size_t total = known ? model_.RowCount() : 0;
+  const int percent =
+      static_cast<int>(std::lround(100.0 * model_.PositionFraction(cursor_row_)));
+
   std::string position = " row " + FormatCount(cursor_row_ + 1);
   if (known) {
-    position += "/" + FormatCount(total);
-    const int percent =
-        total <= 1 ? 100
-                   : static_cast<int>(std::lround(100.0 * cursor_row_ /
-                                                  static_cast<double>(total - 1)));
-    position += " (" + std::to_string(percent) + "%)";
+    position += "/" + FormatCount(model_.RowCount());
   } else {
-    position += "/…";
+    // "~" is doing real work here: it is an estimate from the file size, not a
+    // number anybody counted.
+    const size_t estimate = model_.EstimatedRowCount();
+    position += estimate > 0 ? "/~" + FormatCount(estimate) : "/…";
   }
+  position += " (" + std::to_string(percent) + "%)";
   segments.push_back({position + " ", Color::White, false, 1});
 
   const size_t columns = std::max<size_t>(model_.ColumnCount(), 1);
@@ -377,7 +380,8 @@ Element CSVView::RenderHelp() const {
       {"H", "pin / unpin the header"},
       {"t", "toggle aligned / raw mode"},
       {"?", "toggle this help"},
-      {"q / Esc", "quit (Esc closes overlays first)"},
+      {"Esc", "close overlay, clear search, cancel counting"},
+      {"q", "quit"},
       {"mouse", "wheel scrolls, click moves the cursor"},
   };
 

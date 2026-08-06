@@ -11,6 +11,9 @@ endif()
 
 option(CSVTUI_BUILD_TESTS "Build the unit tests" ON)
 
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+
 include(FetchContent)
 FetchContent_Declare(
   ftxui
@@ -23,10 +26,12 @@ FetchContent_MakeAvailable(ftxui)
 # Parsing and file access, free of any UI dependency so tests can drive them.
 add_library(csvtui_core STATIC
   src/csv_parser.cpp
+  src/csv_system.cpp
   src/csv_model.cpp
+  src/csv_index.cpp
 )
 target_include_directories(csvtui_core PUBLIC src)
-target_link_libraries(csvtui_core PUBLIC ftxui::screen)
+target_link_libraries(csvtui_core PUBLIC ftxui::screen Threads::Threads)
 
 add_executable(csvtui
   src/main.cpp
@@ -53,6 +58,7 @@ if(CSVTUI_BUILD_TESTS)
     tests/test_main.cpp
     tests/test_parser.cpp
     tests/test_model.cpp
+    tests/test_limits.cpp
   )
   target_link_libraries(csvtui_tests PRIVATE csvtui_core)
   target_include_directories(csvtui_tests PRIVATE tests)

@@ -104,9 +104,34 @@ The file could not be read.
 .TP
 .B 2
 The command line was invalid.
+.SH ENVIRONMENT
+.TP
+.B CSVTUI_MEMORY_LIMIT
+Bytes that csvtui may consider available when deciding whether a sort or filter
+will fit in memory. Overrides what the system reports. Useful on shared
+machines, and for testing the guard.
+.SH LARGE FILES
+Browsing does not depend on the size of the file: opening reads about a thousand
+rows and stops, and scrolling stays at a few megabytes of resident memory.
+.PP
+Operations that need the exact row number of the last row \(em
+.BR G ,
+.IB n G
+past the end, sorting, filtering and column statistics \(em start a background
+count that reports progress in the status bar and can be cancelled with
+.BR Esc .
+Until then the status bar shows a
+.B ~
+prefixed estimate derived from the file size. Once counted, the chunk offsets
+are retained and later jumps are instant. Searching and scrolling never trigger
+a count.
+.PP
+Sorting holds roughly 64 bytes per row and filtering roughly 10. csvtui
+estimates that cost up front and refuses the operation, with numbers, rather
+than exhausting memory.
 .SH NOTES
-Sorting and filtering build an index over the whole file and therefore require
-one full pass before the first result appears. All other operations stream.
+Once started, sorting and filtering make one full pass over the file, so on a
+multi-gigabyte file they take a while. All other operations stream.
 .SH SEE ALSO
 .BR column (1),
 .BR csvlook (1)
