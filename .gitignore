@@ -1,3 +1,14 @@
+# Build directories (these hold the vendored FTXUI checkout too)
+build/
+build-*/
+cmake-build-*/
+
+# Editor and tooling
+.cache/
+compile_commands.json
+.vscode/
+.idea/
+
 # Prerequisites
 *.d
 

@@ -1,0 +1,112 @@
+.TH CSVTUI 1 "2026-08-06" "csvtui 0.2.0" "User Commands"
+.SH NAME
+csvtui \- terminal viewer for CSV files
+.SH SYNOPSIS
+.B csvtui
+[\fIoptions\fR] \fIfile.csv\fR
+.br
+\fIcommand\fR | \fBcsvtui\fR [\fIoptions\fR] \fB\-\fR
+.SH DESCRIPTION
+.B csvtui
+displays a CSV file as an aligned grid in the terminal and lets you move around
+it with vim-style keys. The file is read lazily, so only a window of rows is
+resident in memory at any time.
+.PP
+Quoted fields containing the delimiter or newlines, escaped double quotes,
+CRLF line endings and a leading byte order mark are all handled. Column widths
+are measured in terminal cells, so accented and double-width text aligns.
+.SH OPTIONS
+.TP
+.BR \-d ", " \-\-delimiter " " \fIchar\fR
+Field delimiter. Accepts \fBtab\fR or \fB\\t\fR for tab-separated files.
+Auto-detected from the first line when not given.
+.TP
+.B \-\-no\-header
+Treat the first row as data rather than as column names.
+.TP
+.B \-\-header
+Force the first row to be a header. This is the default.
+.TP
+.BR \-h ", " \-\-help
+Print usage and exit.
+.TP
+.BR \-V ", " \-\-version
+Print the version and exit.
+.SH KEYS
+.TP
+.B h j k l
+Move the cursor. Arrow keys work too.
+.TP
+.BR Ctrl\-D ", " Ctrl\-U
+Half page down or up.
+.TP
+.BR Ctrl\-F ", " Ctrl\-B ", " PgDn ", " PgUp
+Full page down or up.
+.TP
+.BR gg ", " G
+Jump to the first or last row. \fIn\fBG\fR jumps to row \fIn\fR.
+.TP
+.BR 0 ", " $
+First or last column.
+.TP
+.B /
+Search forward. Search is smart case: an all-lowercase pattern matches
+case-insensitively. Searches wrap around the end of the file.
+.TP
+.BR n ", " N
+Next or previous match.
+.TP
+.B f
+Filter rows to those matching a pattern. An empty pattern clears the filter.
+.TP
+.BR s ", " S
+Sort by the cursor column, ascending or descending. Numeric columns sort
+numerically.
+.TP
+.B u
+Clear the sort and the filter.
+.TP
+.BR x ", " X
+Hide the cursor column, or show all columns again.
+.TP
+.B z
+Freeze the columns up to the cursor so they stay visible when scrolling right.
+.TP
+.B Enter
+Show the full value of the current cell.
+.TP
+.B y
+Copy the current cell to the system clipboard using OSC 52, which works over
+SSH.
+.TP
+.B c
+Show statistics for the cursor column: row count, empty count, and min, max and
+mean for numeric columns.
+.TP
+.B H
+Pin or unpin the header row.
+.TP
+.B t
+Toggle between aligned and raw modes.
+.TP
+.B ?
+Toggle the help overlay.
+.TP
+.B q
+Quit. \fBEsc\fR closes an overlay first, and clears the search highlight.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+The file could not be read.
+.TP
+.B 2
+The command line was invalid.
+.SH NOTES
+Sorting and filtering build an index over the whole file and therefore require
+one full pass before the first result appears. All other operations stream.
+.SH SEE ALSO
+.BR column (1),
+.BR csvlook (1)
