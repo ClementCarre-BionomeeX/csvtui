@@ -628,11 +628,32 @@ std::string CSVModel::ColumnName(size_t col) const {
 
 // --- search -----------------------------------------------------------------
 
+namespace {
+// How often a search checks whether it has been abandoned. Cheap enough to be
+// invisible, frequent enough that Esc feels immediate.
+constexpr size_t kSearchWatchRows = 2048;
+} // namespace
+
 std::optional<CSVModel::SearchHit>
 CSVModel::FindNext(const std::string &pattern, size_t row, size_t col,
-                   bool wrap) {
+                   bool wrap, const SearchWatch &watch) {
   if (!file_.is_open() || pattern.empty())
     return std::nullopt;
+
+  size_t examined = 0;
+  bool abandoned = false;
+  // Returns false when the search should stop.
+  const auto keep_going = [&] {
+    if (++examined % kSearchWatchRows != 0)
+      return true;
+    if (watch.report)
+      watch.report(examined);
+    if (watch.cancelled && watch.cancelled()) {
+      abandoned = true;
+      return false;
+    }
+    return true;
+  };
 
   const bool ci = csv::SmartCaseInsensitive(pattern);
   // Searching walks forward until a row read fails, so it never needs the row
@@ -645,6 +666,8 @@ CSVModel::FindNext(const std::string &pattern, size_t row, size_t col,
   for (size_t current = row;; ++current) {
     if (bounded && current >= bound)
       break;
+    if (!keep_going())
+      return std::nullopt;
     if (!GetRow(current, fields))
       break;
     for (size_t c = (current == row ? col + 1 : 0); c < fields.size(); ++c) {
@@ -654,10 +677,12 @@ CSVModel::FindNext(const std::string &pattern, size_t row, size_t col,
     }
   }
 
-  if (!wrap)
+  if (!wrap || abandoned)
     return std::nullopt;
 
   for (size_t current = 0; current <= row; ++current) {
+    if (!keep_going())
+      return std::nullopt;
     if (!GetRow(current, fields))
       break;
     for (size_t c = 0; c < fields.size(); ++c) {
@@ -673,9 +698,18 @@ CSVModel::FindNext(const std::string &pattern, size_t row, size_t col,
 
 std::optional<CSVModel::SearchHit>
 CSVModel::FindPrev(const std::string &pattern, size_t row, size_t col,
-                   bool wrap) {
+                   bool wrap, const SearchWatch &watch) {
   if (!file_.is_open() || pattern.empty())
     return std::nullopt;
+
+  size_t examined = 0;
+  const auto keep_going = [&] {
+    if (++examined % kSearchWatchRows != 0)
+      return true;
+    if (watch.report)
+      watch.report(examined);
+    return !(watch.cancelled && watch.cancelled());
+  };
 
   const bool ci = csv::SmartCaseInsensitive(pattern);
   // Walking backwards only needs a bound when wrapping round to the end, so
@@ -687,6 +721,8 @@ CSVModel::FindPrev(const std::string &pattern, size_t row, size_t col,
 
   for (size_t step = 0; step <= row; ++step) {
     const size_t current = row - step;
+    if (!keep_going())
+      return std::nullopt;
     if (!GetRow(current, fields))
       break;
     const size_t upper =
@@ -712,6 +748,8 @@ CSVModel::FindPrev(const std::string &pattern, size_t row, size_t col,
 
   const size_t total = RowCount();
   for (size_t current = total; current-- > row;) {
+    if (!keep_going())
+      return std::nullopt;
     if (!GetRow(current, fields))
       continue;
     for (size_t c = fields.size(); c-- > 0;) {

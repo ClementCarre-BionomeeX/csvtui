@@ -147,6 +147,13 @@ rather than freezing:
   ignored rather than trusted. Point `CSVTUI_CACHE_DIR` elsewhere, or delete the
   directory, at any time.
 
+- **Searching runs in the background too**, but differently: because it
+  produces a cursor position rather than a view, moving around while it looks
+  for one makes no sense. So while a search runs the grid is dimmed, the
+  interface takes no key but `Esc`, and the status line counts the rows
+  examined. A pattern that is not in the file takes as long as reading the file
+  — about 19 seconds for 2 GB — and you can stop it at any point.
+
 Searching and scrolling never trigger a count.
 
 ## Notes

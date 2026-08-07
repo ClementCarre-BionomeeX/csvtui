@@ -52,6 +52,12 @@ First or last column.
 .B /
 Search forward. Search is smart case: an all-lowercase pattern matches
 case-insensitively. Searches wrap around the end of the file.
+.IP
+A search runs on a worker thread, since a pattern that is absent takes as long
+as reading the whole file. While it runs the grid is dimmed and no key but
+.B Esc
+is accepted: a search produces a cursor position, so moving the cursor while it
+looks for one has no meaning.
 .TP
 .BR n ", " N
 Next or previous match.

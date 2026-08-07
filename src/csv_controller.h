@@ -1,8 +1,10 @@
 #pragma once
 
+#include <atomic>
 #include <ftxui/component/component.hpp>
 #include <optional>
 #include <string>
+#include <thread>
 
 #include "csv_model.h"
 #include "csv_scan.h"
@@ -17,6 +19,7 @@ class CSVView;
 class CSVController {
 public:
   CSVController(CSVModel &model, CSVView &view, ftxui::ScreenInteractive &screen);
+  ~CSVController();
 
   ftxui::Component GetComponent();
 
@@ -51,6 +54,28 @@ private:
   bool cancel_requested_ = false;     // Esc pressed; the worker is winding down
   size_t spinner_frame_ = 0;          // advances every frame a pass is running
 
+  // A search walks the file the same way counting does, so it runs on a worker
+  // too. Unlike a sort it produces a cursor position rather than a view, so
+  // letting the cursor be moved while it looks for one makes no sense: while a
+  // search runs the interface takes no key but Esc, and draws the frame it had
+  // when the search began.
+  //
+  // That restriction is what makes this safe as well as sensible. CSVModel is
+  // not thread-safe, and refusing input means nothing on the UI thread reads
+  // the model while the worker has it.
+  std::thread search_thread_;
+  std::atomic<bool> search_cancel_{false};
+  std::atomic<bool> search_finished_{false};
+  std::atomic<size_t> search_examined_{0};
+  bool searching_ = false;
+  std::string search_pattern_;
+  bool search_forward_ = true;
+  size_t search_origin_row_ = 0;
+  size_t search_origin_col_ = 0;
+  std::optional<CSVModel::SearchHit> search_hit_;
+  ftxui::Element frozen_frame_;
+  std::string search_message_;
+
   bool OnEvent(ftxui::Event event);
   bool OnOverlayEvent(ftxui::Event event);
   bool OnTextInputEvent(ftxui::Event event);
@@ -84,6 +109,14 @@ private:
   void UpdateCommandLine();
 
   void RunSearch(const std::string &pattern, bool forward, bool from_cursor);
+  void ApplySearchHit(const std::string &pattern, bool forward, size_t row,
+                      size_t col,
+                      const std::optional<CSVModel::SearchHit> &hit);
+  void StartSearch(const std::string &pattern, bool forward, bool from_cursor);
+  void PollSearch();
+  bool CancelSearch();
+  void JoinSearch();
+  ftxui::Element RenderWhileSearching();
   void RepeatSearch(bool forward);
   void ApplyFilter(const std::string &pattern);
   void SortByCursorColumn(bool descending);

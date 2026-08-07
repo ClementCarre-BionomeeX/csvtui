@@ -62,10 +62,25 @@ public:
   bool ColumnIsNumeric(size_t col) const;
   std::string ColumnName(size_t col) const;
 
+  // Lets a search running on a worker thread say how far it has got and be
+  // abandoned part way. Both may be empty, in which case the search behaves
+  // exactly as it always did.
+  //
+  // A search that walks a whole file takes as long as counting one does, so it
+  // belongs off the UI thread. Nothing here makes CSVModel thread-safe: the
+  // caller must guarantee that no other thread touches the model meanwhile,
+  // which the controller does by refusing every key but Esc while it runs.
+  struct SearchWatch {
+    std::function<bool()> cancelled;
+    std::function<void(size_t rows_examined)> report;
+  };
+
   std::optional<SearchHit> FindNext(const std::string &pattern, size_t row,
-                                    size_t col, bool wrap);
+                                    size_t col, bool wrap,
+                                    const SearchWatch &watch = {});
   std::optional<SearchHit> FindPrev(const std::string &pattern, size_t row,
-                                    size_t col, bool wrap);
+                                    size_t col, bool wrap,
+                                    const SearchWatch &watch = {});
 
   // Ordering and filtering both work by building a view->physical index map.
   void SortByColumn(size_t col, bool descending);

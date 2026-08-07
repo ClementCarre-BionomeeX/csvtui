@@ -6,7 +6,9 @@
 #include "csv_view.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <memory>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -91,6 +93,13 @@ CSVController::CSVController(CSVModel &model, CSVView &view,
   SyncView();
 
   component_ = CatchEvent(Renderer([this] {
+                            // While a search runs the model belongs to the
+                            // worker, so this must not read it: draw the frame
+                            // from before the search instead.
+                            PollSearch();
+                            if (searching_)
+                              return RenderWhileSearching();
+
                             // Recomputing here is what keeps the view correct
                             // when the terminal is resized: FTXUI re-renders on
                             // SIGWINCH without delivering a key event.
@@ -101,6 +110,13 @@ CSVController::CSVController(CSVModel &model, CSVView &view,
                             return view_.Render(size.dimx, size.dimy);
                           }),
                           [this](Event event) { return OnEvent(event); });
+}
+
+CSVController::~CSVController() {
+  // The worker holds a reference to the model and posts to the screen; both
+  // outlive it only if it is stopped first.
+  search_cancel_.store(true, std::memory_order_release);
+  JoinSearch();
 }
 
 Component CSVController::GetComponent() { return component_; }
@@ -388,6 +404,109 @@ std::string CSVController::CurrentCellValue() {
 
 // --- actions ----------------------------------------------------------------
 
+void CSVController::StartSearch(const std::string &pattern, bool forward,
+                                bool from_cursor) {
+  if (pattern.empty() || searching_)
+    return;
+  JoinSearch(); // reap a finished one
+
+  const size_t row = from_cursor ? cursor_row_ : 0;
+  const size_t col = from_cursor ? cursor_col_ : 0;
+
+  search_pattern_ = pattern;
+  search_forward_ = forward;
+  search_origin_row_ = row;
+  search_origin_col_ = col;
+  search_hit_.reset();
+  search_cancel_.store(false, std::memory_order_release);
+  search_finished_.store(false, std::memory_order_release);
+  search_examined_.store(0, std::memory_order_relaxed);
+  searching_ = true;
+
+  // Whatever was on screen when the search began is what stays on screen: the
+  // model belongs to the worker now, and rendering the grid would read it.
+  const auto size = Terminal::Size();
+  frozen_frame_ = view_.Render(size.dimx, size.dimy);
+
+  CSVModel::SearchWatch watch;
+  watch.cancelled = [this] {
+    return search_cancel_.load(std::memory_order_acquire);
+  };
+  // Storing the count is free; waking the UI is not. The search offers a tick
+  // every couple of thousand rows, which is hundreds a second on a large file
+  // — far more redraws than anyone can see.
+  auto last_wake = std::make_shared<std::chrono::steady_clock::time_point>(
+      std::chrono::steady_clock::now());
+  watch.report = [this, last_wake](size_t examined) {
+    search_examined_.store(examined, std::memory_order_relaxed);
+    const auto now = std::chrono::steady_clock::now();
+    if (now - *last_wake < std::chrono::milliseconds(100))
+      return;
+    *last_wake = now;
+    screen_.PostEvent(ftxui::Event::Custom);
+  };
+
+  search_thread_ = std::thread([this, pattern, forward, row, col, watch] {
+    search_hit_ = forward ? model_.FindNext(pattern, row, col, true, watch)
+                          : model_.FindPrev(pattern, row, col, true, watch);
+    search_finished_.store(true, std::memory_order_release);
+    screen_.PostEvent(ftxui::Event::Custom);
+  });
+}
+
+void CSVController::JoinSearch() {
+  if (search_thread_.joinable())
+    search_thread_.join();
+}
+
+bool CSVController::CancelSearch() {
+  if (!searching_)
+    return false;
+  search_cancel_.store(true, std::memory_order_release);
+  SetMessage("stopping search…");
+  return true;
+}
+
+void CSVController::PollSearch() {
+  if (!searching_)
+    return;
+
+  if (!search_finished_.load(std::memory_order_acquire)) {
+    spinner_frame_ = (spinner_frame_ + 1) % kSpinnerFrames;
+    const bool stopping = search_cancel_.load(std::memory_order_acquire);
+    search_message_ =
+        std::string(kSpinner[spinner_frame_]) + " searching for '" +
+        search_pattern_ + "'  (" +
+        csv::HumanCount(search_examined_.load(std::memory_order_relaxed)) +
+        " rows" + (stopping ? ", stopping…" : ", Esc to cancel") + ")";
+    return;
+  }
+
+  JoinSearch();
+  searching_ = false;
+  frozen_frame_ = ftxui::Element();
+
+  const bool cancelled = search_cancel_.load(std::memory_order_acquire);
+  auto hit = search_hit_;
+  search_hit_.reset();
+
+  if (cancelled) {
+    SetMessage("search cancelled", true);
+    return;
+  }
+  ApplySearchHit(search_pattern_, search_forward_, search_origin_row_,
+                 search_origin_col_, hit);
+}
+
+ftxui::Element CSVController::RenderWhileSearching() {
+  // The frame from before the search, dimmed, with a live progress line laid
+  // over its last row. Dimming is the honest signal: the grid is real, and it
+  // is not going to answer you until the search finishes.
+  Element grid = frozen_frame_ ? (frozen_frame_ | dim) : filler();
+  Element line = vbox({filler(), text(search_message_) | color(Color::Yellow)});
+  return dbox({std::move(grid), std::move(line)});
+}
+
 void CSVController::RunSearch(const std::string &pattern, bool forward,
                               bool from_cursor) {
   if (pattern.empty())
@@ -397,7 +516,12 @@ void CSVController::RunSearch(const std::string &pattern, bool forward,
   const size_t col = from_cursor ? cursor_col_ : 0;
   auto hit = forward ? model_.FindNext(pattern, row, col, true)
                      : model_.FindPrev(pattern, row, col, true);
+  ApplySearchHit(pattern, forward, row, col, hit);
+}
 
+void CSVController::ApplySearchHit(const std::string &pattern, bool forward,
+                                   size_t row, size_t col,
+                                   const std::optional<CSVModel::SearchHit> &hit) {
   view_.SetSearch(pattern);
   if (!hit) {
     view_.SetCurrentMatch(std::nullopt, std::nullopt);
@@ -422,7 +546,7 @@ void CSVController::RepeatSearch(bool forward) {
     SetMessage("no previous search", true);
     return;
   }
-  RunSearch(*last_search_, forward, true);
+  StartSearch(*last_search_, forward, true);
 }
 
 void CSVController::ApplyFilter(const std::string &pattern) {
@@ -528,6 +652,15 @@ std::string CSVController::DescribeStats(size_t col,
 // --- event handling ---------------------------------------------------------
 
 bool CSVController::OnEvent(Event event) {
+  // A search owns the model while it runs, so nothing here may touch it. Esc
+  // stops it; everything else waits, which is also the only sensible answer to
+  // "move the cursor" while something is looking for where to put the cursor.
+  if (searching_) {
+    if (event == Event::Escape)
+      CancelSearch();
+    return true;
+  }
+
   if (event.is_mouse())
     return OnMouseEvent(event);
 
@@ -562,7 +695,7 @@ bool CSVController::OnTextInputEvent(Event event) {
     UpdateCommandLine();
 
     if (mode == InputMode::Search) {
-      RunSearch(pattern, true, true);
+      StartSearch(pattern, true, true);
     } else if (pattern.empty()) {
       ApplyFilter(pattern); // clearing never costs anything
     } else {
