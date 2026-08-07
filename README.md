@@ -37,8 +37,8 @@ sudo install -m755 csvtui-linux-x86_64/csvtui /usr/local/bin/
 sudo install -m644 csvtui-linux-x86_64/csvtui.1 /usr/local/share/man/man1/
 ```
 
-Builds are published for Linux x86-64 and for macOS on both Intel and Apple
-silicon.
+Two builds are published: `linux-x86_64`, and `macos-universal`, which is a
+single binary carrying both Apple silicon and Intel slices.
 
 ## Build from source
 

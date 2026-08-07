@@ -21,16 +21,28 @@ jobs:
         include:
           - os: ubuntu-latest
             name: linux-x86_64
-          - os: macos-13
-            name: macos-x86_64
+          # One universal binary rather than two builds. GitHub retired its
+          # Intel macOS runners, and cross-compiling both slices from an Apple
+          # silicon runner is both possible and a nicer thing to download.
           - os: macos-latest
-            name: macos-arm64
+            name: macos-universal
 
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
+      # Two steps rather than one with an interpolated flag: an empty flag is
+      # still an argument, and the semicolon in the architecture list is a
+      # shell metacharacter. Being explicit costs three lines.
       - name: Configure
+        if: runner.os == 'Linux'
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Configure (universal)
+        if: runner.os == 'macOS'
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          "-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64"
 
       - name: Build
         run: cmake --build build -j
@@ -49,6 +61,14 @@ jobs:
           ./build/csvtui --help > /dev/null
           reported="$(./build/csvtui --version)"
           echo "reports: $reported"
+          # Prove the universal binary really carries both slices, rather than
+          # silently having been built for one.
+          if [[ "${{ matrix.name }}" == macos-universal ]]; then
+            file build/csvtui
+            lipo -archs build/csvtui | tr ' ' '\n' | sort > archs.txt
+            printf 'arm64\nx86_64\n' > expected.txt
+            diff archs.txt expected.txt
+          fi
           if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
             expected="csvtui ${GITHUB_REF_NAME#v}"
             if [[ "$reported" != "$expected" ]]; then
