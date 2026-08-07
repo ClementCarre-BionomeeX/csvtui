@@ -17,7 +17,10 @@
 
 namespace {
 
-constexpr const char *kVersion = "0.2.0";
+#ifndef CSVTUI_VERSION
+#define CSVTUI_VERSION "0.0.0-dev"
+#endif
+constexpr const char *kVersion = CSVTUI_VERSION;
 
 void PrintUsage(std::ostream &out, const char *program) {
   out << "csvtui " << kVersion << " — a terminal viewer for CSV files\n\n"

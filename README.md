@@ -25,7 +25,22 @@ into memory.
 - **Gets the alignment right.** Column widths are measured in terminal cells,
   not bytes, so accented and CJK text lines up.
 
-## Build
+## Install
+
+Download a binary for your platform from the
+[latest release](https://github.com/ClementCarre-BionomeeX/csvtui/releases/latest),
+verify it against the published `SHA256SUMS`, and put it on your `PATH`:
+
+```sh
+tar xzf csvtui-linux-x86_64.tar.gz
+sudo install -m755 csvtui-linux-x86_64/csvtui /usr/local/bin/
+sudo install -m644 csvtui-linux-x86_64/csvtui.1 /usr/local/share/man/man1/
+```
+
+Builds are published for Linux x86-64 and for macOS on both Intel and Apple
+silicon.
+
+## Build from source
 
 Requires CMake ≥ 3.16 and a C++17 compiler. FTXUI is fetched automatically.
 
@@ -36,12 +51,8 @@ cmake --build build -j
 ```
 
 Install system-wide with `cmake --install build` (defaults to `/usr/local`).
-
-Run the tests with:
-
-```sh
-ctest --test-dir build --output-on-failure
-```
+See [Tests](#tests) for the test suite, and [CHANGELOG.md](CHANGELOG.md) for
+what changed.
 
 ## Usage
 
@@ -100,67 +111,67 @@ csvtui is built for files that other tools refuse to open. Browsing is O(1) in
 the file size: opening a 12 GB export reads about a thousand rows and stops, and
 scrolling stays at a few megabytes of RSS no matter how far you go.
 
-Some things genuinely need to read everything, and csvtui is explicit about them
-rather than freezing:
+Some things genuinely need to read everything, and csvtui is explicit about
+them rather than freezing.
 
-- **Everything that reads the whole file runs in the background.** Counting
-  rows, sorting, filtering and column statistics all happen on a worker thread
-  that reports progress in the status bar and stops on `Esc`. The grid stays
-  scrollable while they run. The readout updates on a timer rather than on a
-  row count, so it moves at the same rate whatever the file, and a spinner
-  turns alongside the percentage — a number that has not changed for a second
-  looks identical to a program that has stopped. A sort that spills to disk
-  names its second phase, because merging tens of millions of keys takes long
-  enough that sitting silently at 100% would be the same problem again. Each of them is a *single* pass: sorting a file
-  whose length is not yet known no longer counts it first and then sorts it.
-- **Row counts.** The status bar shows `~6 282 862` — a `~` estimate derived
-  from the file size — until something needs the exact number. Once counted,
-  the offsets are kept, so every later jump is instant.
-- **Only the column you asked about is parsed.** Sorting a seven-column file by
-  one column used to build all seven fields of every row and discard six. On a
-  2 GB file that change alone took a sort from 21.7 s to 14.6 s, and a filtered
-  sort from 21.2 s to 10.8 s.
-- **Sorting spills to disk rather than refusing.** A sort holds a key per row
-  while it works, which on a 12 GB export is about 9 GB. Instead it fills a
-  bounded buffer, sorts it, writes it out as a run, and merges the runs at the
-  end — so the only thing that grows with the file is the answer itself, at
-  eight bytes a row. Sorting 23.7 million rows peaks at **1029 MB** on a roomy
-  machine and **349 MB** when told memory is tight, in the same 12 seconds.
-  Temporary runs go to `$CSVTUI_TMPDIR`, else `$TMPDIR`, else `/tmp`, and are
-  deleted even if you cancel.
-- **Filtering** holds one index entry per row, roughly 10 bytes. Before
-  starting, csvtui estimates the cost and **refuses if it would not fit in
-  memory**, telling you what it would need:
+**Nothing blocks the interface.** Counting rows, sorting, filtering and column
+statistics all run on a worker thread that reports progress and stops on `Esc`,
+with the grid still scrollable. Each is a *single* pass: sorting a file whose
+length is not yet known no longer counts it first and then sorts it.
 
-  ```
-  sorting ~156 000 000 rows needs ~9.3 GB, only 4.2 GB usable — filter first
-  ```
+Searching runs on a worker too, but differently. It produces a cursor position
+rather than a view, so moving around while it looks for one makes no sense —
+the grid is dimmed, no key but `Esc` is accepted, and the status line counts
+the rows examined. A pattern that is not in the file takes as long as reading
+the file, about 19 seconds for 2 GB, and you can stop it at any point.
 
-  Set `CSVTUI_MEMORY_LIMIT` (in bytes) to cap what csvtui considers available,
-  which is useful on shared machines. It also shrinks the sort buffer, so a
-  lower limit means more spilling rather than a refusal.
-- **The index outlives the session.** Once a file has been read through, its
-  offset table is written to `~/.cache/csvtui` — about 364 kB for a 2 GB file,
-  2.5 MB for a 12 GB one. Open that file again and the row count is exact
-  before the first frame, with nothing read. The cache records the file's size,
-  modification time, delimiter and header setting; change any of them and it is
-  ignored rather than trusted. Point `CSVTUI_CACHE_DIR` elsewhere, or delete the
-  directory, at any time.
+The readout ticks on a timer rather than on a row count, so it moves at the
+same rate whatever the file, and a spinner turns beside it: a number that has
+not changed for a second looks identical to a program that has stopped.
 
-- **Searching runs in the background too**, but differently: because it
-  produces a cursor position rather than a view, moving around while it looks
-  for one makes no sense. So while a search runs the grid is dimmed, the
-  interface takes no key but `Esc`, and the status line counts the rows
-  examined. A pattern that is not in the file takes as long as reading the file
-  — about 19 seconds for 2 GB — and you can stop it at any point.
+**Row counts are estimated until they are needed.** The status bar shows
+`~6 282 862` — the `~` means it was derived from the file size — until
+something wants the exact number. Searching and scrolling never do.
 
-Searching and scrolling never trigger a count.
+**Only the column you asked about is parsed.** Sorting a seven-column file by
+one column used to build all seven fields of every row and discard six. On a
+2 GB file that alone took a sort from 21.7 s to 14.6 s, and a filtered sort
+from 21.2 s to 10.8 s.
+
+**Sorting spills to disk rather than refusing.** A sort holds a key per row
+while it works, which on a 12 GB export is about 9 GB. Instead it fills a
+bounded buffer, sorts it, writes it out as a run, and merges the runs at the
+end — so the only thing that grows with the file is the answer itself, at eight
+bytes a row. Sorting 23.7 million rows peaks at 1029 MB on a roomy machine and
+349 MB when told memory is tight, in the same 12 seconds. Temporary runs go to
+`$CSVTUI_TMPDIR`, else `$TMPDIR`, else `/tmp`, and are deleted even if you
+cancel.
+
+**Filtering** holds one index entry per row, roughly 10 bytes. csvtui estimates
+that up front and refuses if it would not fit, saying what it would have
+needed:
+
+```
+sorting ~156 000 000 rows needs ~9.3 GB, only 4.2 GB usable — filter first
+```
+
+Set `CSVTUI_MEMORY_LIMIT` (in bytes) to cap what csvtui considers available,
+which is useful on shared machines. It also shrinks the sort buffer, so a lower
+limit means more spilling rather than a refusal.
+
+**The index outlives the session.** Once a file has been read through, its
+offset table goes to `~/.cache/csvtui` — about 364 kB for a 2 GB file, 2.5 MB
+for a 12 GB one. Open that file again and the row count is exact before the
+first frame, with nothing read. The cache records the file's size, modification
+time, delimiter and header setting; change any of them and it is ignored rather
+than trusted. Point `CSVTUI_CACHE_DIR` elsewhere, or delete the directory, at
+any time.
 
 ## Notes
 
-Sorting and filtering still make one full pass over the file once started, so on
-a multi-gigabyte file they take a while. They no longer block the interface or
-risk exhausting memory, and `Esc` abandons them.
+Sorting and filtering read the whole file once started, so on a multi-gigabyte
+file they take a while — they simply do it without blocking you, and `Esc`
+abandons them.
 
 Sorting puts numbers before text in both directions, so empty and non-numeric
 cells collect at the end whether you sort with `s` or `S`. Rows whose sort key

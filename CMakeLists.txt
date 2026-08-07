@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(csvtui VERSION 0.2.0 LANGUAGES CXX)
+project(csvtui VERSION 0.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -47,6 +47,8 @@ target_link_libraries(csvtui PRIVATE
   ftxui::dom
   ftxui::component
 )
+# One definition of the version, so the binary and the project cannot disagree.
+target_compile_definitions(csvtui PRIVATE CSVTUI_VERSION="${PROJECT_VERSION}")
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(csvtui_core PRIVATE -Wall -Wextra)
