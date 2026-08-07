@@ -1,6 +1,5 @@
 #include "test_util.h"
 
-#include "csv_index.h"
 #include "csv_model.h"
 #include "csv_system.h"
 
@@ -10,24 +9,6 @@
 #include <unistd.h>
 
 namespace {
-
-class TempCSV {
-public:
-  explicit TempCSV(const std::string &contents) {
-    char name[] = "csvtui-limit-XXXXXX";
-    const int fd = ::mkstemp(name);
-    path_ = name;
-    if (fd >= 0)
-      ::close(fd);
-    std::ofstream out(path_, std::ios::binary | std::ios::trunc);
-    out << contents;
-  }
-  ~TempCSV() { ::unlink(path_.c_str()); }
-  const std::string &path() const { return path_; }
-
-private:
-  std::string path_;
-};
 
 std::string ManyRows(int rows) {
   std::string out = "id,name,score\n";
@@ -119,20 +100,24 @@ TEST(PositionFractionNeedsNoRowCount) {
   CHECK(!model.RowCountIsExact()); // asking must not have triggered a scan
 }
 
-// Phase 1: the background scan produces the same answer as counting inline.
-TEST(IndexerCountsRowsAndOffsets) {
+// The background scan produces the same answer as counting inline, and the
+// model reads correctly through the offsets it adopts. (The scanner itself is
+// exercised in test_scan.cpp; this is about the handover.)
+TEST(ModelAdoptsABackgroundIndex) {
   TempCSV file(ManyRows(3000));
   CSVModel model;
   CHECK_EQ(model.Open(file.path(), {}, {}), std::string(""));
 
-  CSVIndexer indexer;
-  indexer.Start(file.path(), model.DataOffset(), CSVModel::kChunkSize,
-                model.FileSize(), nullptr);
-  indexer.Join();
-  CHECK(indexer.state() == CSVIndexer::State::Done);
+  csvscan::Request request;
+  model.DescribeScan(request);
 
-  CSVIndexer::Result result;
-  CHECK(indexer.Take(result));
+  CSVScanner scanner;
+  scanner.Start(request, nullptr);
+  scanner.Join();
+  CHECK(scanner.state() == CSVScanner::State::Done);
+
+  CSVScanner::Result result;
+  CHECK(scanner.Take(result));
   CHECK_EQ(result.total_rows, size_t{3000});
   // One offset for the start plus one per completed chunk.
   CHECK_EQ(result.offsets.size(), size_t{3000 / CSVModel::kChunkSize + 1});
@@ -150,31 +135,42 @@ TEST(IndexerCountsRowsAndOffsets) {
   CHECK(!model.GetRow(3000, fields));
 }
 
-TEST(IndexerCanBeCancelled) {
-  TempCSV file(ManyRows(200000));
-  CSVModel model;
-  CHECK_EQ(model.Open(file.path(), {}, {}), std::string(""));
+// A view built in the background must behave exactly like one built inline.
+TEST(ModelAdoptsABackgroundSort) {
+  TempCSV file(ManyRows(3000));
+  CSVModel inline_model;
+  CHECK_EQ(inline_model.Open(file.path(), {}, {}), std::string(""));
+  inline_model.SortByColumn(1, false);
 
-  CSVIndexer indexer;
-  indexer.Start(file.path(), model.DataOffset(), CSVModel::kChunkSize,
-                model.FileSize(), nullptr);
-  indexer.Cancel();
-  indexer.Join();
+  CSVModel background;
+  CHECK_EQ(background.Open(file.path(), {}, {}), std::string(""));
 
-  const auto state = indexer.state();
-  CHECK(state == CSVIndexer::State::Cancelled || state == CSVIndexer::State::Done);
-  if (state == CSVIndexer::State::Cancelled) {
-    CSVIndexer::Result result;
-    CHECK(!indexer.Take(result)); // nothing to adopt from a cancelled scan
+  csvscan::Request request;
+  background.DescribeScan(request);
+  request.sort = true;
+  request.sort_column = 1;
+  request.want_order = true;
+
+  CSVScanner scanner;
+  scanner.Start(request, nullptr);
+  scanner.Join();
+  CSVScanner::Result result;
+  CHECK(scanner.Take(result));
+
+  CSVModel::ViewState state;
+  state.sort_active = true;
+  state.sort_column = 1;
+  background.AdoptIndex(std::move(result.offsets), result.total_rows);
+  background.AdoptView(state, std::move(result.order), result.has_order);
+
+  CHECK_EQ(background.RowCount(), inline_model.RowCount());
+  std::vector<std::string> here, there;
+  for (size_t row : {size_t{0}, size_t{1}, size_t{1500}, size_t{2999}}) {
+    CHECK(background.GetRow(row, here));
+    CHECK(inline_model.GetRow(row, there));
+    CHECK(here == there);
   }
-}
-
-TEST(IndexerReportsFailureOnMissingFile) {
-  CSVIndexer indexer;
-  indexer.Start("/definitely/not/here.csv", std::streampos(0),
-                CSVModel::kChunkSize, 0, nullptr);
-  indexer.Join();
-  CHECK(indexer.state() == CSVIndexer::State::Failed);
+  CHECK(background.sort_active());
 }
 
 // Searching must not be the thing that triggers a full-file scan.

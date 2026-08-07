@@ -28,7 +28,7 @@ add_library(csvtui_core STATIC
   src/csv_parser.cpp
   src/csv_system.cpp
   src/csv_model.cpp
-  src/csv_index.cpp
+  src/csv_scan.cpp
 )
 target_include_directories(csvtui_core PUBLIC src)
 target_link_libraries(csvtui_core PUBLIC ftxui::screen Threads::Threads)
@@ -59,8 +59,23 @@ if(CSVTUI_BUILD_TESTS)
     tests/test_parser.cpp
     tests/test_model.cpp
     tests/test_limits.cpp
+    tests/test_scan.cpp
   )
   target_link_libraries(csvtui_tests PRIVATE csvtui_core)
   target_include_directories(csvtui_tests PRIVATE tests)
   add_test(NAME csvtui_tests COMMAND csvtui_tests)
+endif()
+
+# libFuzzer needs Clang. The crash that shipped was undefined behaviour on a
+# byte value, so build this with -fsanitize=address,undefined as well or it
+# will happily run straight past the thing it is looking for.
+option(CSVTUI_BUILD_FUZZERS "Build the libFuzzer targets (requires Clang)" OFF)
+if(CSVTUI_BUILD_FUZZERS)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "CSVTUI_BUILD_FUZZERS requires Clang")
+  endif()
+  add_executable(fuzz_parser tests/fuzz/fuzz_parser.cpp)
+  target_link_libraries(fuzz_parser PRIVATE csvtui_core)
+  target_compile_options(fuzz_parser PRIVATE -fsanitize=fuzzer)
+  target_link_options(fuzz_parser PRIVATE -fsanitize=fuzzer)
 endif()

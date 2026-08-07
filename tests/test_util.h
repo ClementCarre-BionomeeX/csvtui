@@ -1,9 +1,35 @@
 #pragma once
 
+#include <cstdio>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <string>
+#include <unistd.h>
 #include <vector>
+
+// Writes `contents` to a uniquely named file that is removed on destruction.
+class TempCSV {
+public:
+  explicit TempCSV(const std::string &contents) {
+    char name[] = "csvtui-test-XXXXXX";
+    const int fd = ::mkstemp(name);
+    path_ = name;
+    if (fd >= 0)
+      ::close(fd);
+    std::ofstream out(path_, std::ios::binary | std::ios::trunc);
+    out << contents;
+  }
+  ~TempCSV() { ::unlink(path_.c_str()); }
+
+  TempCSV(const TempCSV &) = delete;
+  TempCSV &operator=(const TempCSV &) = delete;
+
+  const std::string &path() const { return path_; }
+
+private:
+  std::string path_;
+};
 
 struct TestCase {
   std::string name;

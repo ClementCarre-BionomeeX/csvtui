@@ -9,26 +9,6 @@
 
 namespace {
 
-// Writes `contents` to a uniquely named file that is removed on destruction.
-class TempCSV {
-public:
-  explicit TempCSV(const std::string &contents) {
-    char name[] = "csvtui-test-XXXXXX";
-    const int fd = ::mkstemp(name);
-    path_ = name;
-    if (fd >= 0)
-      ::close(fd);
-    std::ofstream out(path_, std::ios::binary | std::ios::trunc);
-    out << contents;
-  }
-  ~TempCSV() { ::unlink(path_.c_str()); }
-
-  const std::string &path() const { return path_; }
-
-private:
-  std::string path_;
-};
-
 std::string Cell(CSVModel &model, size_t row, size_t col) {
   std::vector<std::string> fields;
   if (!model.GetRow(row, fields))

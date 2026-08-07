@@ -35,7 +35,8 @@ jobs:
         include:
           - name: address + undefined sanitizers
             flags: "-fsanitize=address,undefined -fno-omit-frame-pointer -g"
-          # The row counter runs on a worker thread, so races are a real risk.
+          # Counting, sorting and filtering all run on a worker thread, so
+          # races are a real risk.
           - name: thread sanitizer
             flags: "-fsanitize=thread -g"
     steps:
@@ -51,6 +52,74 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  # Drives the real binary through a pty, typing accented characters and
+  # control bytes at its prompts.
+  #
+  # macOS is not optional here. The crash that shipped was undefined behaviour
+  # on a negative `char`, which glibc absorbs and the BSD-derived libc on macOS
+  # turns into a segfault — so the bug was invisible on Linux and fatal for
+  # everyone else. This job is the one that would have caught it.
+  tui-fuzz:
+    name: pty fuzz (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Fuzz the terminal UI
+        run: python3 tests/fuzz/fuzz_tui.py ./build/csvtui --rounds 40 --timeout 30
+
+  # Coverage-guided fuzzing of the parser and the scanning pass. Short, because
+  # it runs on every pull request; the point is to keep the harness working and
+  # to replay the corpus, not to run a long campaign here.
+  fuzz:
+    name: libFuzzer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -S . -B build-fuzz -DCSVTUI_BUILD_FUZZERS=ON
+          -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined,fuzzer-no-link
+          -fno-omit-frame-pointer -g"
+        # fuzzer-no-link instruments the library too, so coverage feedback
+        # reaches the parser and not just the entry point.
+
+      - name: Build
+        run: cmake --build build-fuzz -j --target fuzz_parser
+
+      - name: Replay the corpus
+        run: ./build-fuzz/fuzz_parser tests/fuzz/corpus
+
+      - name: Fuzz
+        run: >
+          ./build-fuzz/fuzz_parser tests/fuzz/corpus
+          -max_total_time=120 -max_len=4096 -print_final_stats=1
+
+      - name: Save any crash
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash
+          path: |
+            crash-*
+            timeout-*
+            oom-*
+          if-no-files-found: ignore
 
   format:
     name: clang-format (advisory)

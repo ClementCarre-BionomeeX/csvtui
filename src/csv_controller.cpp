@@ -88,7 +88,7 @@ CSVController::CSVController(CSVModel &model, CSVView &view,
                             // Recomputing here is what keeps the view correct
                             // when the terminal is resized: FTXUI re-renders on
                             // SIGWINCH without delivering a key event.
-                            PollIndexer();
+                            PollScanner();
                             ClampToView();
                             SyncView();
                             const auto size = Terminal::Size();
@@ -171,94 +171,149 @@ void CSVController::GoToRow(size_t row) {
   } else if (model_.RowCountKnown()) {
     cursor_row_ = KnownLastRow();
   } else {
-    RequestExactCount(PendingJump::Row, row);
+    RequestExactCount(Task::Row, row);
     return;
   }
   ClampToView();
 }
 
-// --- background row count ---------------------------------------------------
+// --- background passes ------------------------------------------------------
+//
+// Counting, sorting, filtering and column statistics all need to read every
+// row, so they all run here: on a worker thread, reporting progress, and
+// abandonable with Esc. Nothing below blocks the UI.
 
-void CSVController::RequestExactCount(PendingJump jump, size_t row,
-                                      const std::string &filter) {
-  pending_jump_ = jump;
-  pending_row_ = row;
-  pending_filter_ = filter;
+void CSVController::StartScan(Task task, const csvscan::Request &request,
+                              const std::string &label) {
+  // A second request supersedes the first rather than queueing behind it.
+  if (scanner_.running()) {
+    scanner_.Cancel();
+    scanner_.Join();
+  }
 
-  if (model_.RowCountKnown()) {
-    PollIndexer(); // nothing to scan; apply straight away
-    return;
-  }
-  if (!indexer_.running()) {
-    indexer_.Start(model_.real_path(), model_.DataOffset(), CSVModel::kChunkSize,
-                   model_.FileSize(), [this] {
-                     // Called from the worker thread; waking the loop is the
-                     // only cross-thread interaction.
-                     screen_.PostEvent(ftxui::Event::Custom);
-                   });
-  }
-  SetMessage("counting rows… Esc to cancel");
+  task_ = task;
+  task_label_ = label;
+  scanner_.Start(request, [this] {
+    // Called from the worker thread; waking the loop is the only cross-thread
+    // interaction, and PostEvent is the one FTXUI call that allows it.
+    screen_.PostEvent(ftxui::Event::Custom);
+  });
+  SetMessage(label + "… Esc to cancel");
 }
 
-bool CSVController::CancelIndexing() {
-  if (!indexer_.running())
+void CSVController::RequestExactCount(Task task, size_t row) {
+  task_row_ = row;
+
+  if (model_.RowCountKnown()) {
+    // Nothing to read; apply straight away.
+    task_ = task;
+    csvscan::Result empty;
+    FinishScan(empty);
+    return;
+  }
+
+  csvscan::Request request;
+  model_.DescribeScan(request);
+  StartScan(task, request, "counting rows");
+}
+
+bool CSVController::CancelScan() {
+  if (!scanner_.running())
     return false;
-  indexer_.Cancel();
-  pending_jump_ = PendingJump::None;
-  SetMessage("counting cancelled", true);
+  // The worker only notices between rows, so it keeps running for a moment
+  // yet. Say so now: pressing Esc and watching the percentage climb on is
+  // indistinguishable from Esc not working.
+  scanner_.Cancel();
+  task_ = Task::None;
+  cancel_requested_ = true;
+  SetMessage("stopping " + task_label_ + "…");
   return true;
 }
 
-void CSVController::PollIndexer() {
-  if (indexer_.running()) {
-    const int percent = static_cast<int>(indexer_.progress() * 100.0);
-    SetMessage("counting rows… " + std::to_string(percent) + "%  (" +
-               csv::HumanCount(indexer_.rows_seen()) + " so far, Esc to cancel)");
+void CSVController::PollScanner() {
+  if (scanner_.running()) {
+    // Leave the "stopping" message alone rather than overwriting it with a
+    // progress reading the user has just asked to be rid of.
+    if (cancel_requested_)
+      return;
+
+    const int percent = static_cast<int>(scanner_.progress() * 100.0);
+    const bool filtering = scanner_.request().filter &&
+                           !scanner_.request().filter_pattern.empty();
+    // While filtering, the useful number is how many rows survived, not how
+    // many were read.
+    const std::string count =
+        filtering ? csv::HumanCount(scanner_.rows_kept()) + " matched"
+                  : csv::HumanCount(scanner_.rows_seen()) + " rows";
+    SetMessage(task_label_ + "… " + std::to_string(percent) + "%  (" + count +
+               ", Esc to cancel)");
     return;
   }
 
-  if (indexer_.state() == CSVIndexer::State::Done) {
-    CSVIndexer::Result result;
-    if (indexer_.Take(result))
-      model_.AdoptIndex(std::move(result.offsets), result.total_rows);
-  } else if (indexer_.state() == CSVIndexer::State::Failed) {
-    indexer_.Join();
-    SetMessage("could not read the file to count its rows", true);
-    pending_jump_ = PendingJump::None;
+  if (scanner_.state() == CSVScanner::State::Failed) {
+    scanner_.Join();
+    SetMessage("could not read " + model_.path(), true);
+    task_ = Task::None;
+    cancel_requested_ = false;
     return;
   }
 
-  if (pending_jump_ == PendingJump::None)
+  if (cancel_requested_ && scanner_.state() == CSVScanner::State::Cancelled) {
+    scanner_.Join();
+    cancel_requested_ = false;
+    SetMessage(task_label_ + " cancelled", true);
     return;
-  if (!model_.RowCountKnown())
-    return; // cancelled before finishing
+  }
 
-  const PendingJump jump = pending_jump_;
-  const size_t row = pending_row_;
-  const std::string filter = pending_filter_;
-  pending_jump_ = PendingJump::None;
-  pending_filter_.clear();
+  csvscan::Result result;
+  if (!scanner_.Take(result))
+    return; // idle, or cancelled before finishing
+  if (task_ == Task::None) {
+    // A pass whose result nobody is waiting for — but it still counted the
+    // file on its way through, so keep that much.
+    model_.AdoptIndex(std::move(result.offsets), result.total_rows);
+    cancel_requested_ = false;
+    return;
+  }
 
-  switch (jump) {
-  case PendingJump::End:
+  // Every full pass yields the offset table and the exact row count, whatever
+  // it was actually asked for.
+  model_.AdoptIndex(std::move(result.offsets), result.total_rows);
+  FinishScan(result);
+}
+
+void CSVController::FinishScan(csvscan::Result &result) {
+  const Task task = task_;
+  task_ = Task::None;
+
+  switch (task) {
+  case Task::End:
     cursor_row_ = KnownLastRow();
     SetMessage(csv::HumanCount(model_.RowCount()) + " rows");
     break;
-  case PendingJump::Row:
-    cursor_row_ = std::min(row, KnownLastRow());
+  case Task::Row:
+    cursor_row_ = std::min(task_row_, KnownLastRow());
     SetMessage(std::string());
     break;
-  case PendingJump::Sort:
-  case PendingJump::SortDesc:
-    SortByCursorColumn(jump == PendingJump::SortDesc);
+  case Task::Sort:
+    model_.AdoptView(task_view_, std::move(result.order), result.has_order);
+    cursor_row_ = 0;
+    start_row_ = 0;
+    SetMessage("sorted by " + model_.ColumnName(task_view_.sort_column) +
+               (task_view_.sort_descending ? " (desc)" : " (asc)"));
     break;
-  case PendingJump::Filter:
-    ApplyFilter(filter);
+  case Task::Filter:
+    model_.AdoptView(task_view_, std::move(result.order), result.has_order);
+    cursor_row_ = 0;
+    start_row_ = 0;
+    SetMessage(task_view_.filter_active
+                   ? csv::HumanCount(model_.RowCount()) + " row(s) match"
+                   : std::string("filter cleared"));
     break;
-  case PendingJump::Stats:
-    ShowColumnStats();
+  case Task::Stats:
+    SetMessage(DescribeStats(task_column_, result.stats));
     break;
-  case PendingJump::None:
+  case Task::None:
     break;
   }
   ClampToView();
@@ -349,31 +404,64 @@ void CSVController::RepeatSearch(bool forward) {
 }
 
 void CSVController::ApplyFilter(const std::string &pattern) {
-  if (pattern.empty()) {
-    model_.ClearFilter();
+  CSVModel::ViewState target = model_.CurrentViewState();
+  target.filter_active = !pattern.empty();
+  target.filter_pattern = pattern;
+
+  // Dropping the filter from an otherwise unordered view needs no work at all:
+  // the view becomes the file again.
+  if (!target.filter_active && !target.sort_active) {
+    model_.AdoptView(target, {}, false);
+    cursor_row_ = 0;
+    start_row_ = 0;
+    ClampToView();
     SetMessage("filter cleared");
-  } else {
-    const size_t matches = model_.ApplyFilter(pattern);
-    SetMessage(std::to_string(matches) + " row(s) match");
+    return;
   }
-  cursor_row_ = 0;
-  start_row_ = 0;
-  ClampToView();
+
+  csvscan::Request request;
+  model_.DescribeScan(request);
+  request.filter = target.filter_active;
+  request.filter_pattern = target.filter_pattern;
+  request.sort = target.sort_active;
+  request.sort_column = target.sort_column;
+  request.sort_descending = target.sort_descending;
+  request.want_order = true;
+
+  task_view_ = target;
+  StartScan(Task::Filter, request,
+            target.filter_active ? "filtering" : "restoring order");
 }
 
 void CSVController::SortByCursorColumn(bool descending) {
-  model_.SortByColumn(cursor_col_, descending);
-  cursor_row_ = 0;
-  start_row_ = 0;
-  SetMessage("sorted by " + model_.ColumnName(cursor_col_) +
-             (descending ? " (desc)" : " (asc)"));
+  CSVModel::ViewState target = model_.CurrentViewState();
+  target.sort_active = true;
+  target.sort_column = cursor_col_;
+  target.sort_descending = descending;
+
+  csvscan::Request request;
+  model_.DescribeScan(request);
+  request.filter = target.filter_active;
+  request.filter_pattern = target.filter_pattern;
+  request.sort = true;
+  request.sort_column = target.sort_column;
+  request.sort_descending = descending;
+  request.want_order = true;
+
+  task_view_ = target;
+  StartScan(Task::Sort, request, "sorting by " + model_.ColumnName(cursor_col_));
 }
 
 void CSVController::ClearOrdering() {
-  model_.ClearSort();
-  model_.ClearFilter();
+  if (scanner_.running()) {
+    scanner_.Cancel();
+    scanner_.Join();
+    task_ = Task::None;
+  }
+  model_.AdoptView(CSVModel::ViewState{}, {}, false);
   view_.ShowAllColumns();
-  cursor_row_ = std::min(cursor_row_, KnownLastRow());
+  cursor_row_ = 0;
+  start_row_ = 0;
   ClampToView();
   SetMessage("sort and filter cleared");
 }
@@ -386,17 +474,33 @@ void CSVController::YankCurrentCell() {
 }
 
 void CSVController::ShowColumnStats() {
-  const auto stats = model_.ComputeColumnStats(cursor_col_);
+  const CSVModel::ViewState view = model_.CurrentViewState();
+
+  csvscan::Request request;
+  model_.DescribeScan(request);
+  // Statistics describe the rows on screen, so an active filter applies. A
+  // sort does not: it reorders the same set.
+  request.filter = view.filter_active;
+  request.filter_pattern = view.filter_pattern;
+  request.want_stats = true;
+  request.stats_column = cursor_col_;
+
+  task_column_ = cursor_col_;
+  StartScan(Task::Stats, request, "scanning " + model_.ColumnName(cursor_col_));
+}
+
+std::string CSVController::DescribeStats(size_t col,
+                                         const csvscan::Stats &stats) const {
   std::ostringstream out;
-  out << model_.ColumnName(cursor_col_) << ": " << stats.total << " rows, "
-      << stats.empty << " empty";
+  out << model_.ColumnName(col) << ": " << csv::HumanCount(stats.total)
+      << " rows, " << csv::HumanCount(stats.empty) << " empty";
   if (stats.numeric > 0) {
     out << ", min " << FormatDouble(stats.min) << ", max "
         << FormatDouble(stats.max) << ", mean " << FormatDouble(stats.mean);
   } else {
     out << ", non-numeric";
   }
-  SetMessage(out.str());
+  return out.str();
 }
 
 // --- event handling ---------------------------------------------------------
@@ -443,8 +547,6 @@ bool CSVController::OnTextInputEvent(Event event) {
       const std::string blocked = model_.CheckFilterFeasible();
       if (!blocked.empty())
         SetMessage(blocked, true);
-      else if (!model_.RowCountKnown())
-        RequestExactCount(PendingJump::Filter, 0, pattern);
       else
         ApplyFilter(pattern);
     }
@@ -518,7 +620,7 @@ bool CSVController::OnNormalEvent(Event event) {
     return true;
   }
   if (event == Event::Escape) {
-    if (CancelIndexing())
+    if (CancelScan())
       return true;
     view_.SetSearch(std::string());
     view_.SetCurrentMatch(std::nullopt, std::nullopt);
@@ -551,7 +653,7 @@ bool CSVController::OnNormalEvent(Event event) {
     else
       // Jumping to the end is the one motion that genuinely needs the row
       // count, so hand it to the background scan instead of freezing.
-      RequestExactCount(PendingJump::End);
+      RequestExactCount(Task::End);
     return true;
   }
 
@@ -620,10 +722,7 @@ bool CSVController::OnNormalEvent(Event event) {
       SetMessage(blocked, true);
       return true;
     }
-    if (!model_.RowCountKnown())
-      RequestExactCount(descending ? PendingJump::SortDesc : PendingJump::Sort);
-    else
-      SortByCursorColumn(descending);
+    SortByCursorColumn(descending);
     return true;
   }
   if (event == Event::Character('u')) {
@@ -671,10 +770,7 @@ bool CSVController::OnNormalEvent(Event event) {
     return true;
   }
   if (event == Event::Character('c')) {
-    if (!model_.RowCountKnown())
-      RequestExactCount(PendingJump::Stats);
-    else
-      ShowColumnStats();
+    ShowColumnStats();
     return true;
   }
 

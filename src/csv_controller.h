@@ -4,7 +4,8 @@
 #include <optional>
 #include <string>
 
-#include "csv_index.h"
+#include "csv_model.h"
+#include "csv_scan.h"
 
 namespace ftxui {
 class ScreenInteractive;
@@ -38,12 +39,16 @@ private:
   std::string input_buffer_;
   std::optional<std::string> last_search_;
 
-  // What to do once the background row count finishes.
-  enum class PendingJump { None, End, Row, Sort, SortDesc, Filter, Stats };
-  CSVIndexer indexer_;
-  PendingJump pending_jump_ = PendingJump::None;
-  size_t pending_row_ = 0;
-  std::string pending_filter_;
+  // Work that needs a full pass over the file. It runs on a worker thread, so
+  // the UI stays live and Esc cancels; `task_` says what to do with the result.
+  enum class Task { None, End, Row, Sort, Filter, Stats };
+  CSVScanner scanner_;
+  Task task_ = Task::None;
+  size_t task_row_ = 0;               // target row, for Task::Row
+  size_t task_column_ = 0;            // subject column, for Task::Stats
+  CSVModel::ViewState task_view_;     // the view the pass is building
+  std::string task_label_;            // "sorting by price", shown while it runs
+  bool cancel_requested_ = false;     // Esc pressed; the worker is winding down
 
   bool OnEvent(ftxui::Event event);
   bool OnOverlayEvent(ftxui::Event event);
@@ -60,11 +65,14 @@ private:
   // Last existing row in [low, high], found with probes instead of a scan.
   size_t LastRowBetween(size_t low, size_t high);
 
-  // Starts (or reuses) the background scan, remembering what to do after.
-  void RequestExactCount(PendingJump jump, size_t row = 0,
-                         const std::string &filter = std::string());
-  void PollIndexer();
-  bool CancelIndexing();
+  // Starts a background pass, replacing any pass already in flight.
+  void StartScan(Task task, const csvscan::Request &request,
+                 const std::string &label);
+  // Starts a pass that only counts rows, remembering what to do afterwards.
+  void RequestExactCount(Task task, size_t row = 0);
+  void PollScanner();
+  bool CancelScan();
+  void FinishScan(csvscan::Result &result);
 
   void MoveCursorRows(long long delta);
   void MoveCursorColumns(long long delta);
@@ -81,5 +89,6 @@ private:
   void ClearOrdering();
   void YankCurrentCell();
   void ShowColumnStats();
+  std::string DescribeStats(size_t col, const csvscan::Stats &stats) const;
   std::string CurrentCellValue();
 };

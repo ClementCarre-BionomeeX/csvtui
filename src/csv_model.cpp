@@ -653,65 +653,57 @@ CSVModel::FindPrev(const std::string &pattern, size_t row, size_t col,
 
 // --- ordering ---------------------------------------------------------------
 
+CSVModel::ViewState CSVModel::CurrentViewState() const {
+  ViewState state;
+  state.sort_active = sort_active_;
+  state.sort_column = sort_column_;
+  state.sort_descending = sort_descending_;
+  state.filter_active = filter_active_;
+  state.filter_pattern = filter_pattern_;
+  return state;
+}
+
+void CSVModel::DescribeScan(csvscan::Request &request) const {
+  request.path = real_path_;
+  request.data_offset = data_offset_;
+  request.file_size = file_size_;
+  request.delimiter = delimiter_;
+  request.chunk_size = kChunkSize;
+  request.expected_rows = EstimatedRowCount();
+}
+
+void CSVModel::AdoptView(const ViewState &state, std::vector<size_t> order,
+                         bool has_order) {
+  sort_active_ = state.sort_active;
+  sort_column_ = state.sort_column;
+  sort_descending_ = state.sort_descending;
+  filter_active_ = state.filter_active;
+  filter_pattern_ = state.filter_pattern;
+  order_ = has_order ? std::move(order) : std::vector<size_t>();
+}
+
 void CSVModel::RebuildOrder() {
-  const size_t total = EnsureTotalRowCount();
+  // The same pass the background scanner runs, driven on this thread. Keeping
+  // one implementation is what stops a foreground sort and a background sort
+  // from ever disagreeing.
+  csvscan::Request request;
+  DescribeScan(request);
+  request.filter = filter_active_;
+  request.filter_pattern = filter_pattern_;
+  request.sort = sort_active_;
+  request.sort_column = sort_column_;
+  request.sort_descending = sort_descending_;
+  request.want_order = true;
 
-  std::vector<size_t> candidates;
-  std::vector<std::string> fields;
-
-  if (filter_active_ && !filter_pattern_.empty()) {
-    const bool ci = csv::SmartCaseInsensitive(filter_pattern_);
-    for (size_t i = 0; i < total; ++i) {
-      if (!GetPhysicalRow(i, fields))
-        break;
-      const bool hit = std::any_of(
-          fields.begin(), fields.end(), [&](const std::string &value) {
-            return csv::FindFrom(value, filter_pattern_, 0, ci) !=
-                   std::string::npos;
-          });
-      if (hit)
-        candidates.push_back(i);
-    }
-  } else {
-    candidates.resize(total);
-    std::iota(candidates.begin(), candidates.end(), size_t{0});
+  csvscan::Result result;
+  if (csvscan::Run(request, result, nullptr, nullptr) !=
+      csvscan::Outcome::Done) {
+    order_.clear();
+    return;
   }
 
-  if (sort_active_) {
-    // Pre-extract the sort keys so comparison does not re-read the file.
-    const size_t col = sort_column_;
-    std::vector<std::pair<std::string, double>> keys(candidates.size());
-    std::vector<char> is_number(candidates.size(), 0);
-    for (size_t i = 0; i < candidates.size(); ++i) {
-      if (!GetPhysicalRow(candidates[i], fields))
-        continue;
-      const std::string value = col < fields.size() ? fields[col] : std::string();
-      double number = 0.0;
-      is_number[i] = csv::ParseNumber(value, number) ? 1 : 0;
-      keys[i] = {value, number};
-    }
-
-    std::vector<size_t> slots(candidates.size());
-    std::iota(slots.begin(), slots.end(), size_t{0});
-    std::stable_sort(slots.begin(), slots.end(), [&](size_t a, size_t b) {
-      if (is_number[a] && is_number[b])
-        return keys[a].second < keys[b].second;
-      if (is_number[a] != is_number[b])
-        return is_number[a] > is_number[b]; // numbers before text
-      return keys[a].first < keys[b].first;
-    });
-    if (sort_descending_)
-      std::reverse(slots.begin(), slots.end());
-
-    std::vector<size_t> ordered;
-    ordered.reserve(slots.size());
-    for (size_t slot : slots)
-      ordered.push_back(candidates[slot]);
-    candidates.swap(ordered);
-  }
-
-  const bool identity = !sort_active_ && !filter_active_;
-  order_ = identity ? std::vector<size_t>() : std::move(candidates);
+  AdoptIndex(std::move(result.offsets), result.total_rows);
+  order_ = result.has_order ? std::move(result.order) : std::vector<size_t>();
 }
 
 void CSVModel::SortByColumn(size_t col, bool descending) {
@@ -740,36 +732,17 @@ void CSVModel::ClearFilter() {
 }
 
 CSVModel::ColumnStats CSVModel::ComputeColumnStats(size_t col) {
-  ColumnStats stats;
-  const size_t total = RowCount();
-  std::vector<std::string> fields;
-  double sum = 0.0;
-  bool first = true;
+  csvscan::Request request;
+  DescribeScan(request);
+  request.filter = filter_active_;
+  request.filter_pattern = filter_pattern_;
+  request.want_stats = true;
+  request.stats_column = col;
 
-  for (size_t i = 0; i < total; ++i) {
-    if (!GetRow(i, fields))
-      break;
-    ++stats.total;
-    const std::string value = col < fields.size() ? fields[col] : std::string();
-    if (value.empty()) {
-      ++stats.empty;
-      continue;
-    }
-    double number = 0.0;
-    if (!csv::ParseNumber(value, number))
-      continue;
-    ++stats.numeric;
-    sum += number;
-    if (first) {
-      stats.min = stats.max = number;
-      first = false;
-    } else {
-      stats.min = std::min(stats.min, number);
-      stats.max = std::max(stats.max, number);
-    }
-  }
+  csvscan::Result result;
+  if (csvscan::Run(request, result, nullptr, nullptr) != csvscan::Outcome::Done)
+    return ColumnStats{};
 
-  if (stats.numeric > 0)
-    stats.mean = sum / static_cast<double>(stats.numeric);
-  return stats;
+  AdoptIndex(std::move(result.offsets), result.total_rows);
+  return result.stats;
 }

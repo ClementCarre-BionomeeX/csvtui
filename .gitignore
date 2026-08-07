@@ -3,6 +3,15 @@ build/
 build-*/
 cmake-build-*/
 
+# Python bytecode, from the fuzz harness
+__pycache__/
+*.pyc
+
+# libFuzzer leftovers
+crash-*
+timeout-*
+oom-*
+
 # Editor and tooling
 .cache/
 compile_commands.json

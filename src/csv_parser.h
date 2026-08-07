@@ -11,9 +11,82 @@ namespace csv {
 // appear inside quoted fields.
 char DetectDelimiter(const std::string &line);
 
+namespace detail {
+
+// The RFC 4180 field state machine, shared by everything below so there is only
+// one definition of what a field is. `visit(index, value)` is called once per
+// field and returns false to stop early; `buffer` holds the field being built
+// and is left holding the last one visited, so a caller scanning a whole file
+// can hand in the same string every time and stop allocating after a few rows.
+template <typename Visitor>
+void ForEachField(const std::string &record, char delimiter, std::string &buffer,
+                  Visitor &&visit) {
+  buffer.clear();
+  size_t index = 0;
+  bool in_quotes = false;
+  bool field_started = false;
+
+  for (size_t i = 0; i < record.size(); ++i) {
+    const char c = record[i];
+    if (in_quotes) {
+      if (c != '"') {
+        buffer.push_back(c);
+        continue;
+      }
+      // "" inside a quoted field is a literal quote.
+      if (i + 1 < record.size() && record[i + 1] == '"') {
+        buffer.push_back('"');
+        ++i;
+      } else {
+        in_quotes = false;
+      }
+      continue;
+    }
+
+    if (c == '"' && !field_started) {
+      in_quotes = true;
+      field_started = true;
+    } else if (c == delimiter) {
+      if (!visit(index, static_cast<const std::string &>(buffer)))
+        return;
+      ++index;
+      buffer.clear();
+      field_started = false;
+    } else {
+      buffer.push_back(c);
+      field_started = true;
+    }
+  }
+
+  visit(index, static_cast<const std::string &>(buffer));
+}
+
+} // namespace detail
+
 // Splits one logical record into fields following RFC 4180: quoted fields may
 // contain the delimiter and newlines, and "" is an escaped quote.
 std::vector<std::string> SplitRecord(const std::string &record, char delimiter);
+
+// Copies field `index` of the record into `out`, stopping as soon as it has it
+// and never building the fields around it. Sorting a seven-column file by one
+// column throws away six of every seven fields SplitRecord would have built;
+// over millions of rows that is most of the work. `out` is empty when the
+// record has no such field.
+//
+// `scratch` is the walker's working buffer, reused across calls. It is a
+// separate string from `out` on purpose: it grows to the longest field walked
+// *past* — an email column, say — and keeps that capacity. Handing it back as
+// the result would give every one of a million sort keys a heap block sized
+// for a field it does not hold.
+void ExtractField(const std::string &record, char delimiter, size_t index,
+                  std::string &out, std::string &scratch);
+
+// True when any field of the record contains `needle`. Equivalent to searching
+// each element of SplitRecord, but it stops at the first hit and unquotes into
+// `scratch` rather than into a fresh vector of strings.
+bool RecordContains(const std::string &record, char delimiter,
+                    const std::string &needle, bool ignore_case,
+                    std::string &scratch);
 
 // Reads one logical record, consuming newlines that occur inside quoted
 // fields. Trailing \r is stripped so CRLF files behave. Returns false at EOF.

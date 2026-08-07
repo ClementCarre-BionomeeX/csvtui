@@ -46,42 +46,43 @@ char DetectDelimiter(const std::string &line) {
 
 std::vector<std::string> SplitRecord(const std::string &record, char delimiter) {
   std::vector<std::string> fields;
-  std::string field;
-  bool in_quotes = false;
-  bool field_started = false;
-
-  for (size_t i = 0; i < record.size(); ++i) {
-    const char c = record[i];
-    if (in_quotes) {
-      if (c != '"') {
-        field.push_back(c);
-        continue;
-      }
-      // "" inside a quoted field is a literal quote.
-      if (i + 1 < record.size() && record[i + 1] == '"') {
-        field.push_back('"');
-        ++i;
-      } else {
-        in_quotes = false;
-      }
-      continue;
-    }
-
-    if (c == '"' && !field_started) {
-      in_quotes = true;
-      field_started = true;
-    } else if (c == delimiter) {
-      fields.push_back(field);
-      field.clear();
-      field_started = false;
-    } else {
-      field.push_back(c);
-      field_started = true;
-    }
-  }
-
-  fields.push_back(field);
+  std::string buffer;
+  detail::ForEachField(record, delimiter, buffer,
+                       [&](size_t, const std::string &value) {
+                         fields.push_back(value);
+                         return true;
+                       });
   return fields;
+}
+
+void ExtractField(const std::string &record, char delimiter, size_t index,
+                  std::string &out, std::string &scratch) {
+  bool found = false;
+  detail::ForEachField(record, delimiter, scratch,
+                       [&](size_t i, const std::string &value) {
+                         if (i < index)
+                           return true;
+                         out.assign(value);
+                         found = true;
+                         return false;
+                       });
+  if (!found)
+    out.clear();
+}
+
+bool RecordContains(const std::string &record, char delimiter,
+                    const std::string &needle, bool ignore_case,
+                    std::string &scratch) {
+  bool hit = false;
+  detail::ForEachField(record, delimiter, scratch,
+                       [&](size_t, const std::string &value) {
+                         if (FindFrom(value, needle, 0, ignore_case) ==
+                             std::string::npos)
+                           return true;
+                         hit = true;
+                         return false;
+                       });
+  return hit;
 }
 
 bool ReadRecord(std::istream &in, std::string &out) {

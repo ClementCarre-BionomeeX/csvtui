@@ -114,17 +114,23 @@ machines, and for testing the guard.
 Browsing does not depend on the size of the file: opening reads about a thousand
 rows and stops, and scrolling stays at a few megabytes of resident memory.
 .PP
-Operations that need the exact row number of the last row \(em
+Everything that must read every row \(em
 .BR G ,
 .IB n G
-past the end, sorting, filtering and column statistics \(em start a background
-count that reports progress in the status bar and can be cancelled with
+past the end, sorting, filtering and column statistics \(em runs on a worker
+thread, reports progress in the status bar and stops on
 .BR Esc .
-Until then the status bar shows a
+The grid stays scrollable throughout. Each is a single pass: sorting a file
+whose length is not yet known no longer counts it first and then sorts it.
+.PP
+Until the file has been read the status bar shows a
 .B ~
-prefixed estimate derived from the file size. Once counted, the chunk offsets
-are retained and later jumps are instant. Searching and scrolling never trigger
-a count.
+prefixed row estimate derived from the file size. Once counted, the chunk
+offsets are retained and later jumps are instant. Searching and scrolling never
+trigger a count.
+.PP
+Only the column being sorted or summarised is parsed out of each record, rather
+than every field of every row.
 .PP
 Sorting holds roughly 64 bytes per row and filtering roughly 10. csvtui
 estimates that cost up front and refuses the operation, with numbers, rather
@@ -132,6 +138,13 @@ than exhausting memory.
 .SH NOTES
 Once started, sorting and filtering make one full pass over the file, so on a
 multi-gigabyte file they take a while. All other operations stream.
+.PP
+Sorting places numbers before text in both directions, so empty and
+non-numeric cells collect at the end whether the sort is ascending or
+descending. Rows with equal keys keep their order in the file.
+.PP
+Column statistics describe the rows currently visible, so an active filter
+applies to them; a sort does not, since it reorders the same set.
 .SH SEE ALSO
 .BR column (1),
 .BR csvlook (1)

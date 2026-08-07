@@ -103,11 +103,18 @@ scrolling stays at a few megabytes of RSS no matter how far you go.
 Some things genuinely need to read everything, and csvtui is explicit about them
 rather than freezing:
 
+- **Everything that reads the whole file runs in the background.** Counting
+  rows, sorting, filtering and column statistics all happen on a worker thread
+  that reports progress in the status bar and stops on `Esc`. The grid stays
+  scrollable while they run. Each of them is a *single* pass: sorting a file
+  whose length is not yet known no longer counts it first and then sorts it.
 - **Row counts.** The status bar shows `~6 282 862` — a `~` estimate derived
-  from the file size — until something needs the exact number. `G`, `<n>G` past
-  the end, sorting, filtering and column statistics start a **background count**
-  that reports progress and can be cancelled with `Esc`. The UI stays live
-  throughout. Once counted, the offsets are kept, so every later jump is instant.
+  from the file size — until something needs the exact number. Once counted,
+  the offsets are kept, so every later jump is instant.
+- **Only the column you asked about is parsed.** Sorting a seven-column file by
+  one column used to build all seven fields of every row and discard six. On a
+  2 GB file that change alone took a sort from 21.7 s to 14.6 s, and a filtered
+  sort from 21.2 s to 10.8 s.
 - **Sorting and filtering** hold one index entry per row: roughly 64 bytes per
   row to sort, 10 to filter. Before starting, csvtui estimates the cost and
   **refuses if it would not fit in memory**, telling you what it would need:
@@ -124,7 +131,38 @@ Searching and scrolling never trigger a count.
 ## Notes
 
 Sorting and filtering still make one full pass over the file once started, so on
-a multi-gigabyte file they take a while. They no longer risk exhausting memory.
+a multi-gigabyte file they take a while. They no longer block the interface or
+risk exhausting memory, and `Esc` abandons them.
+
+Sorting puts numbers before text in both directions, so empty and non-numeric
+cells collect at the end whether you sort with `s` or `S`. Rows whose sort key
+is equal keep their order in the file, which means sorting by one column and
+then another refines the result instead of scrambling it.
+
+## Tests
+
+```sh
+ctest --test-dir build --output-on-failure   # unit tests
+tests/fuzz/fuzz_tui.py ./build/csvtui        # drive the real UI through a pty
+```
+
+The pty harness types accented characters, control bytes and overlong strings
+into the viewer's prompts and checks it still exits cleanly. It exists because
+the one crash that reached users was undefined behaviour on a negative `char`,
+which glibc absorbs and the libc on macOS turns into a segfault: no unit test
+could see it, and no Linux machine could reproduce it. CI runs this harness on
+macOS as well as Linux, under the address and undefined-behaviour sanitizers.
+
+There is also a libFuzzer target for the parser and the scanning pass, off by
+default because it needs Clang:
+
+```sh
+cmake -S . -B build-fuzz -DCSVTUI_BUILD_FUZZERS=ON -DCMAKE_CXX_COMPILER=clang++ \
+      -DCMAKE_BUILD_TYPE=Debug \
+      -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined,fuzzer-no-link -g"
+cmake --build build-fuzz -j --target fuzz_parser
+./build-fuzz/fuzz_parser tests/fuzz/corpus -max_total_time=60
+```
 
 ## License
 

@@ -7,6 +7,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "csv_scan.h"
+
 // Streams a CSV file from disk, keeping only a bounded window of parsed rows in
 // memory. Row indices handed to and returned from this class are *view*
 // indices: when a sort or filter is active they are positions in the reordered
@@ -20,14 +22,8 @@ public:
     size_t len = 0;
   };
 
-  struct ColumnStats {
-    size_t total = 0;
-    size_t empty = 0;
-    size_t numeric = 0;
-    double min = 0.0;
-    double max = 0.0;
-    double mean = 0.0;
-  };
+  // Computed by the same pass whether it runs here or on a worker thread.
+  using ColumnStats = csvscan::Stats;
 
   CSVModel() = default;
   ~CSVModel();
@@ -114,8 +110,28 @@ public:
   std::string CheckFilterFeasible() const;
 
   // Replaces the chunk offset table and row count with the results of a scan
-  // performed elsewhere (see CSVIndexer).
+  // performed elsewhere (see CSVScanner).
   void AdoptIndex(std::vector<std::streampos> offsets, size_t total_rows);
+
+  // The sort and filter currently in effect. Handed to CSVScanner to describe
+  // the view a background pass should produce, and back to AdoptView with the
+  // index it built.
+  struct ViewState {
+    bool sort_active = false;
+    size_t sort_column = 0;
+    bool sort_descending = false;
+    bool filter_active = false;
+    std::string filter_pattern;
+  };
+
+  ViewState CurrentViewState() const;
+  // Installs an ordering computed elsewhere. `has_order` false means the view
+  // is the file in its own order, which is stored as no index at all.
+  void AdoptView(const ViewState &state, std::vector<size_t> order,
+                 bool has_order);
+  // Fills a scan request describing this model, so callers do not have to know
+  // which of its internals the scanner needs.
+  void DescribeScan(csvscan::Request &request) const;
 
   static constexpr size_t kChunkSize = 512;
   // Measured on real files: sorting costs ~64 bytes per row (the candidate
