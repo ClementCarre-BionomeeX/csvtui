@@ -49,6 +49,7 @@ private:
   CSVModel::ViewState task_view_;     // the view the pass is building
   std::string task_label_;            // "sorting by price", shown while it runs
   bool cancel_requested_ = false;     // Esc pressed; the worker is winding down
+  size_t spinner_frame_ = 0;          // advances every frame a pass is running
 
   bool OnEvent(ftxui::Event event);
   bool OnOverlayEvent(ftxui::Event event);

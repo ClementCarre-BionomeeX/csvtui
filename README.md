@@ -106,7 +106,12 @@ rather than freezing:
 - **Everything that reads the whole file runs in the background.** Counting
   rows, sorting, filtering and column statistics all happen on a worker thread
   that reports progress in the status bar and stops on `Esc`. The grid stays
-  scrollable while they run. Each of them is a *single* pass: sorting a file
+  scrollable while they run. The readout updates on a timer rather than on a
+  row count, so it moves at the same rate whatever the file, and a spinner
+  turns alongside the percentage — a number that has not changed for a second
+  looks identical to a program that has stopped. A sort that spills to disk
+  names its second phase, because merging tens of millions of keys takes long
+  enough that sitting silently at 100% would be the same problem again. Each of them is a *single* pass: sorting a file
   whose length is not yet known no longer counts it first and then sorts it.
 - **Row counts.** The status bar shows `~6 282 862` — a `~` estimate derived
   from the file size — until something needs the exact number. Once counted,

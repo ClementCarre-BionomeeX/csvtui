@@ -161,7 +161,8 @@ bool RunStore::Spill(std::vector<Key> &keys, const Order &order) {
 
 bool RunStore::Merge(std::vector<Key> &tail, const Order &order,
                      std::vector<size_t> &out,
-                     const std::function<bool()> &cancelled) {
+                     const std::function<bool()> &cancelled,
+                     const std::function<void(size_t)> &report) {
   std::sort(tail.begin(), tail.end(), order);
 
   std::vector<std::unique_ptr<RunReader>> readers;
@@ -205,16 +206,20 @@ bool RunStore::Merge(std::vector<Key> &tail, const Order &order,
   }
 
   size_t since_check = 0;
+  size_t merged = 0;
   while (!heap.empty()) {
     if (++since_check >= kCancelCheckRows) {
       since_check = 0;
       if (cancelled && cancelled())
         return false;
+      if (report)
+        report(merged);
     }
 
     Head head = heap.top();
     heap.pop();
     out.push_back(head.key.row);
+    ++merged;
 
     if (head.source == tail_source) {
       if (tail_index < tail.size()) {
@@ -226,6 +231,8 @@ bool RunStore::Merge(std::vector<Key> &tail, const Order &order,
     }
   }
 
+  if (report)
+    report(merged);
   return true;
 }
 

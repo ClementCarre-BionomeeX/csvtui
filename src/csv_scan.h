@@ -86,10 +86,16 @@ struct Result {
   std::string error;
 };
 
+// Which part of the work is running. A large sort reads the file and then
+// merges what it spilled, and the merge is not instant — leaving the readout
+// at "100%" through it is exactly the silence this reports away.
+enum class Phase { Reading, Merging };
+
 struct Progress {
   size_t rows = 0;     // records read so far
   size_t kept = 0;     // of those, how many the filter accepted
-  double fraction = 0; // 0..1, by bytes consumed
+  double fraction = 0; // 0..1, within the current phase
+  Phase phase = Phase::Reading;
 };
 
 enum class Outcome { Done, Cancelled, Failed };
@@ -134,6 +140,7 @@ public:
   size_t rows_seen() const { return rows_seen_.load(std::memory_order_relaxed); }
   // Rows kept by the filter so far. Equals rows_seen() when not filtering.
   size_t rows_kept() const { return rows_kept_.load(std::memory_order_relaxed); }
+  csvscan::Phase phase() const { return phase_.load(std::memory_order_relaxed); }
 
   // What this pass was asked for, so the UI can name it while it runs.
   const Request &request() const { return request_; }
@@ -155,6 +162,7 @@ private:
   std::atomic<double> progress_{0.0};
   std::atomic<size_t> rows_seen_{0};
   std::atomic<size_t> rows_kept_{0};
+  std::atomic<csvscan::Phase> phase_{csvscan::Phase::Reading};
 
   Request request_; // written before the worker starts, read-only after
   std::string error_; // written before state_ becomes Failed

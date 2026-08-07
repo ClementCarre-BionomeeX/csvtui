@@ -22,6 +22,12 @@ namespace {
 // Guard against overflow when a user leans on a digit key.
 constexpr size_t kMaxCount = 1'000'000'000ULL;
 
+// Braille dots, which are a single cell wide and turn smoothly. The point of
+// them is motion rather than information: the percentage says how far along a
+// pass is, and this says that it is still going.
+const char *const kSpinner[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
+constexpr size_t kSpinnerFrames = sizeof(kSpinner) / sizeof(kSpinner[0]);
+
 const char *const kCtrlB = "\x02";
 const char *const kCtrlD = "\x04";
 const char *const kCtrlF = "\x06";
@@ -238,15 +244,25 @@ void CSVController::PollScanner() {
       return;
 
     const int percent = static_cast<int>(scanner_.progress() * 100.0);
+    const bool merging = scanner_.phase() == csvscan::Phase::Merging;
     const bool filtering = scanner_.request().filter &&
                            !scanner_.request().filter_pattern.empty();
     // While filtering, the useful number is how many rows survived, not how
-    // many were read.
+    // many were read; while merging it is how many are in their final place.
     const std::string count =
-        filtering ? csv::HumanCount(scanner_.rows_kept()) + " matched"
-                  : csv::HumanCount(scanner_.rows_seen()) + " rows";
-    SetMessage(task_label_ + "… " + std::to_string(percent) + "%  (" + count +
-               ", Esc to cancel)");
+        merging ? csv::HumanCount(scanner_.rows_kept()) + " placed"
+        : filtering ? csv::HumanCount(scanner_.rows_kept()) + " matched"
+                    : csv::HumanCount(scanner_.rows_seen()) + " rows";
+
+    // The spinner turns on every frame, not on every percent. A file whose
+    // rows are cheap to read can sit on one number for a while, and a static
+    // number is indistinguishable from a program that has stopped.
+    spinner_frame_ = (spinner_frame_ + 1) % kSpinnerFrames;
+    const std::string spinner(kSpinner[spinner_frame_]);
+
+    SetMessage(spinner + " " + task_label_ +
+               (merging ? " — merging " : "… ") + std::to_string(percent) +
+               "%  (" + count + ", Esc to cancel)");
     return;
   }
 

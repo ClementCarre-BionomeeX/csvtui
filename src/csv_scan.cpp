@@ -4,14 +4,18 @@
 #include "csv_sortrun.h"
 
 #include <algorithm>
+#include <chrono>
 #include <utility>
 
 namespace csvscan {
 namespace {
 
-// How often the pass reports progress. Often enough to feel live, rarely
-// enough that waking the UI is not the bottleneck.
-constexpr size_t kReportEveryRows = 200000;
+// How often the pass reports progress. Checking the clock every row would be
+// its own cost, so the row count is a cheap gate on doing so; the clock then
+// decides. Reporting on rows alone made the readout jump on a fast file and
+// sit still on a slow one, which is the opposite of what it is for.
+constexpr size_t kRowsBetweenClockChecks = 4096;
+constexpr auto kReportInterval = std::chrono::milliseconds(100);
 
 using csvsort::Key;
 
@@ -74,12 +78,15 @@ Outcome Run(const Request &request, Result &out,
   size_t since_report = 0;
   const size_t chunk_size = std::max<size_t>(request.chunk_size, 1);
 
+  auto last_report = std::chrono::steady_clock::now();
+
   const auto publish = [&](bool final) {
     if (!report)
       return;
     Progress progress;
     progress.rows = rows;
     progress.kept = kept_count;
+    progress.phase = Phase::Reading;
     if (final) {
       progress.fraction = 1.0;
     } else {
@@ -91,6 +98,7 @@ Outcome Run(const Request &request, Result &out,
       }
     }
     report(progress);
+    last_report = std::chrono::steady_clock::now();
   };
 
   while (true) {
@@ -164,9 +172,10 @@ Outcome Run(const Request &request, Result &out,
       }
     }
 
-    if (since_report >= kReportEveryRows) {
+    if (since_report >= kRowsBetweenClockChecks) {
       since_report = 0;
-      publish(false);
+      if (std::chrono::steady_clock::now() - last_report >= kReportInterval)
+        publish(false);
     }
   }
 
@@ -183,7 +192,33 @@ Outcome Run(const Request &request, Result &out,
         out.order.push_back(key.row);
     } else {
       out.spilled_runs = runs.run_count() + (keys.empty() ? 0 : 1);
-      if (!runs.Merge(keys, order, out.order, cancelled)) {
+      // Merging tens of millions of keys takes seconds of its own. Reporting
+      // it separately is the difference between a progress bar and a program
+      // that appears to have stopped at 100%.
+      const size_t expected = kept_count;
+      auto merge_report =
+          report ? std::function<void(size_t)>([&](size_t merged) {
+            // Same rate limit as the read. The merge offers a tick every few
+            // thousand rows, which on a large sort is hundreds a second — far
+            // more redraws than anyone can see, and each one wakes the UI.
+            const auto now = std::chrono::steady_clock::now();
+            if (merged != expected && now - last_report < kReportInterval)
+              return;
+            last_report = now;
+
+            Progress progress;
+            progress.rows = rows;
+            progress.kept = merged;
+            progress.phase = Phase::Merging;
+            progress.fraction =
+                expected == 0 ? 1.0
+                              : std::min(1.0, static_cast<double>(merged) /
+                                                  static_cast<double>(expected));
+            report(progress);
+          })
+                 : std::function<void(size_t)>();
+
+      if (!runs.Merge(keys, order, out.order, cancelled, merge_report)) {
         if (!runs.error().empty()) {
           out.error = runs.error();
           return Outcome::Failed;
@@ -219,6 +254,7 @@ void CSVScanner::Start(Request request, std::function<void()> notify) {
 
   request_ = request;
   error_.clear();
+  phase_.store(csvscan::Phase::Reading, std::memory_order_relaxed);
   cancel_.store(false, std::memory_order_release);
   progress_.store(0.0, std::memory_order_relaxed);
   rows_seen_.store(0, std::memory_order_relaxed);
@@ -257,6 +293,7 @@ void CSVScanner::Run(Request request, std::function<void()> notify) {
         rows_seen_.store(progress.rows, std::memory_order_relaxed);
         rows_kept_.store(progress.kept, std::memory_order_relaxed);
         progress_.store(progress.fraction, std::memory_order_relaxed);
+        phase_.store(progress.phase, std::memory_order_relaxed);
         if (notify)
           notify();
       });

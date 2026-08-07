@@ -86,10 +86,12 @@ public:
   bool Spill(std::vector<Key> &keys, const Order &order);
 
   // Merges every run, plus `tail` (the unspilled remainder, sorted here),
-  // appending row numbers to `out` in order. `cancelled` is polled every few
-  // thousand rows and may be empty.
+  // appending row numbers to `out` in order. `cancelled` is polled and
+  // `report` is called with the running total every few thousand rows; either
+  // may be empty. Merging a large sort is slow enough to need saying so.
   bool Merge(std::vector<Key> &tail, const Order &order,
-             std::vector<size_t> &out, const std::function<bool()> &cancelled);
+             std::vector<size_t> &out, const std::function<bool()> &cancelled,
+             const std::function<void(size_t)> &report = {});
 
 private:
   std::string directory_;
