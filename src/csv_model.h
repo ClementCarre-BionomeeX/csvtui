@@ -101,6 +101,12 @@ public:
   size_t EstimatedSortBytes() const;
   size_t EstimatedFilterBytes() const;
 
+  // How much a sort may spend on keys before spilling a run to disk. What is
+  // left of the budget once the resulting order is accounted for, bounded at
+  // both ends.
+  size_t SortMemoryBudget(size_t available_bytes) const;
+  size_t SortMemoryBudget() const;
+
   // Empty when the operation fits in `available_bytes`, otherwise a sentence
   // explaining why it was refused. `available_bytes == 0` means "unknown",
   // which never refuses.
@@ -112,6 +118,15 @@ public:
   // Replaces the chunk offset table and row count with the results of a scan
   // performed elsewhere (see CSVScanner).
   void AdoptIndex(std::vector<std::streampos> offsets, size_t total_rows);
+
+  // The offset table is expensive to build and small to keep, so it outlives
+  // the session. LoadIndex is tried on open; SaveIndex is worth calling
+  // whenever a full pass has just made the count exact. Both are best-effort:
+  // a cache that cannot be read or written costs only the time it saved.
+  bool LoadIndex();
+  bool SaveIndex() const;
+  // True when the row count came from a cache rather than from reading.
+  bool row_count_came_from_cache() const { return count_from_cache_; }
 
   // The sort and filter currently in effect. Handed to CSVScanner to describe
   // the view a background pass should produce, and back to AdoptView with the
@@ -134,10 +149,17 @@ public:
   void DescribeScan(csvscan::Request &request) const;
 
   static constexpr size_t kChunkSize = 512;
-  // Measured on real files: sorting costs ~64 bytes per row (the candidate
-  // list, the extracted keys, and the output permutation), filtering ~10.
-  static constexpr size_t kSortBytesPerRow = 64;
+  // A sort holds one key per row while it works — measured at ~61 bytes — but
+  // those spill to temporary files once the buffer is full, so the only cost
+  // that follows the row count is the answer: one row number per row.
+  static constexpr size_t kSortKeyBytesPerRow = 61;
+  static constexpr size_t kSortOutputBytesPerRow = sizeof(size_t);
   static constexpr size_t kFilterBytesPerRow = 10;
+  // How much a sort may hold before spilling. The floor is what makes an
+  // enormous sort possible at all; the ceiling stops a roomy machine from
+  // buffering far more than merging a few extra runs would have cost.
+  static constexpr size_t kMinSortBufferBytes = 32u * 1024 * 1024;
+  static constexpr size_t kMaxSortBufferBytes = 512u * 1024 * 1024;
   // Never spend more than this share of what is available.
   static constexpr double kMemoryBudgetShare = 0.6;
 
@@ -157,6 +179,7 @@ private:
 
   size_t total_rows_ = 0;
   bool total_rows_known_ = false;
+  bool count_from_cache_ = false;
   long long file_size_ = 0;
   double average_record_bytes_ = 0.0;
 

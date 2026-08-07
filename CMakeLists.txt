@@ -27,15 +27,19 @@ FetchContent_MakeAvailable(ftxui)
 add_library(csvtui_core STATIC
   src/csv_parser.cpp
   src/csv_system.cpp
+  src/csv_cache.cpp
   src/csv_model.cpp
   src/csv_scan.cpp
+  src/csv_sortrun.cpp
+  # The view is here rather than in the executable so the tests can render it
+  # off-screen and compare the result against a golden file.
+  src/csv_view.cpp
 )
 target_include_directories(csvtui_core PUBLIC src)
-target_link_libraries(csvtui_core PUBLIC ftxui::screen Threads::Threads)
+target_link_libraries(csvtui_core PUBLIC ftxui::screen ftxui::dom Threads::Threads)
 
 add_executable(csvtui
   src/main.cpp
-  src/csv_view.cpp
   src/csv_controller.cpp
 )
 target_link_libraries(csvtui PRIVATE
@@ -60,9 +64,15 @@ if(CSVTUI_BUILD_TESTS)
     tests/test_model.cpp
     tests/test_limits.cpp
     tests/test_scan.cpp
+    tests/test_sortrun.cpp
+    tests/test_cache.cpp
+    tests/test_view.cpp
   )
   target_link_libraries(csvtui_tests PRIVATE csvtui_core)
   target_include_directories(csvtui_tests PRIVATE tests)
+  # So the snapshot tests can find their golden files wherever they are run.
+  target_compile_definitions(csvtui_tests PRIVATE
+    CSVTUI_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests")
   add_test(NAME csvtui_tests COMMAND csvtui_tests)
 endif()
 

@@ -1,0 +1,14 @@
+id │name        │role  │score
+────────────────────────────────────────────────────────────────────────────────
+  1│Alice       │Admin │    7
+  2│Bob         │Editor│   42
+  3│Dupont, Jean│      │ 1000
+  4│中文字      │Viewer│    8
+  5│Eve         │Admin │
+  6│Frank       │Editor│    3
+
+
+
+
+ sample.csv │ row 2/6 (17%) │  col 4/5 role  │ delim ','         ? help  q quit
+

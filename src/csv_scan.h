@@ -62,6 +62,12 @@ struct Request {
   // whether the sort fits in memory at all. Zero means "no idea", which is
   // safe but leaves that spike in place.
   size_t expected_rows = 0;
+
+  // How much memory the sort may spend on keys before writing a sorted run to
+  // a temporary file and starting a fresh buffer. This is what decouples the
+  // cost of a sort from the size of the file. Zero keeps every key in memory,
+  // which is right for small files and for the tests.
+  size_t sort_memory_budget = 0;
 };
 
 struct Result {
@@ -72,6 +78,12 @@ struct Result {
   std::vector<size_t> order;
   bool has_order = false;
   Stats stats;
+  // How many sorted runs the sort had to spill. Zero means it fit in memory.
+  size_t spilled_runs = 0;
+  // Set when the outcome is Failed, saying what went wrong. Running out of
+  // temporary disk space is the interesting case, and a bare "sort failed"
+  // would leave nowhere to go.
+  std::string error;
 };
 
 struct Progress {
@@ -126,6 +138,10 @@ public:
   // What this pass was asked for, so the UI can name it while it runs.
   const Request &request() const { return request_; }
 
+  // Why the pass failed. Only meaningful once state() == Failed; safe to read
+  // then, because it is written before the state is published.
+  const std::string &error() const { return error_; }
+
   // Moves the finished result out. Only valid once state() == Done; returns
   // false otherwise. Leaves the scanner Idle.
   bool Take(Result &out);
@@ -141,6 +157,7 @@ private:
   std::atomic<size_t> rows_kept_{0};
 
   Request request_; // written before the worker starts, read-only after
+  std::string error_; // written before state_ becomes Failed
   std::mutex result_mutex_;
   Result result_;
 };

@@ -107,9 +107,24 @@ The command line was invalid.
 .SH ENVIRONMENT
 .TP
 .B CSVTUI_MEMORY_LIMIT
-Bytes that csvtui may consider available when deciding whether a sort or filter
+Bytes that csvtui may consider available when deciding whether an operation
 will fit in memory. Overrides what the system reports. Useful on shared
-machines, and for testing the guard.
+machines, and for testing the guard. A lower limit shrinks the sort buffer,
+which means more spilling rather than a refusal.
+.TP
+.B CSVTUI_TMPDIR
+Directory for the temporary runs a large sort writes. Falls back to
+.B TMPDIR
+and then to
+.BR /tmp .
+Worth setting when the default is a small tmpfs and the file being sorted is
+not small.
+.TP
+.B CSVTUI_CACHE_DIR
+Where chunk offset tables are kept between sessions. Falls back to
+.I $XDG_CACHE_HOME/csvtui
+and then to
+.IR ~/.cache/csvtui .
 .SH LARGE FILES
 Browsing does not depend on the size of the file: opening reads about a thousand
 rows and stops, and scrolling stays at a few megabytes of resident memory.
@@ -126,15 +141,20 @@ whose length is not yet known no longer counts it first and then sorts it.
 Until the file has been read the status bar shows a
 .B ~
 prefixed row estimate derived from the file size. Once counted, the chunk
-offsets are retained and later jumps are instant. Searching and scrolling never
-trigger a count.
+offsets are retained \(em and written to the cache directory, so reopening the
+same file starts with an exact count and nothing read. Searching and scrolling
+never trigger a count.
 .PP
 Only the column being sorted or summarised is parsed out of each record, rather
 than every field of every row.
 .PP
-Sorting holds roughly 64 bytes per row and filtering roughly 10. csvtui
-estimates that cost up front and refuses the operation, with numbers, rather
-than exhausting memory.
+A sort fills a bounded buffer with keys, sorts it, writes it to a temporary
+file as a run, and merges the runs at the end, so its memory does not follow
+the size of the file: what remains is the resulting order, at one row number
+per row. Runs are removed when the sort finishes or is cancelled.
+.PP
+Filtering holds roughly 10 bytes per row. csvtui estimates that cost up front
+and refuses, with numbers, rather than exhausting memory.
 .SH NOTES
 Once started, sorting and filtering make one full pass over the file, so on a
 multi-gigabyte file they take a while. All other operations stream.

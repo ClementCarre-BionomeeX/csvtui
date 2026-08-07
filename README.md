@@ -115,16 +115,32 @@ rather than freezing:
   one column used to build all seven fields of every row and discard six. On a
   2 GB file that change alone took a sort from 21.7 s to 14.6 s, and a filtered
   sort from 21.2 s to 10.8 s.
-- **Sorting and filtering** hold one index entry per row: roughly 64 bytes per
-  row to sort, 10 to filter. Before starting, csvtui estimates the cost and
-  **refuses if it would not fit in memory**, telling you what it would need:
+- **Sorting spills to disk rather than refusing.** A sort holds a key per row
+  while it works, which on a 12 GB export is about 9 GB. Instead it fills a
+  bounded buffer, sorts it, writes it out as a run, and merges the runs at the
+  end — so the only thing that grows with the file is the answer itself, at
+  eight bytes a row. Sorting 23.7 million rows peaks at **1029 MB** on a roomy
+  machine and **349 MB** when told memory is tight, in the same 12 seconds.
+  Temporary runs go to `$CSVTUI_TMPDIR`, else `$TMPDIR`, else `/tmp`, and are
+  deleted even if you cancel.
+- **Filtering** holds one index entry per row, roughly 10 bytes. Before
+  starting, csvtui estimates the cost and **refuses if it would not fit in
+  memory**, telling you what it would need:
 
   ```
   sorting ~156 000 000 rows needs ~9.3 GB, only 4.2 GB usable — filter first
   ```
 
   Set `CSVTUI_MEMORY_LIMIT` (in bytes) to cap what csvtui considers available,
-  which is useful on shared machines.
+  which is useful on shared machines. It also shrinks the sort buffer, so a
+  lower limit means more spilling rather than a refusal.
+- **The index outlives the session.** Once a file has been read through, its
+  offset table is written to `~/.cache/csvtui` — about 364 kB for a 2 GB file,
+  2.5 MB for a 12 GB one. Open that file again and the row count is exact
+  before the first frame, with nothing read. The cache records the file's size,
+  modification time, delimiter and header setting; change any of them and it is
+  ignored rather than trusted. Point `CSVTUI_CACHE_DIR` elsewhere, or delete the
+  directory, at any time.
 
 Searching and scrolling never trigger a count.
 
@@ -144,6 +160,15 @@ then another refines the result instead of scrambling it.
 ```sh
 ctest --test-dir build --output-on-failure   # unit tests
 tests/fuzz/fuzz_tui.py ./build/csvtui        # drive the real UI through a pty
+```
+
+Some of those tests are screen snapshots: the view is rendered off-screen and
+compared against a file in `tests/golden`. When a layout change is intended,
+regenerate them and read the diff before committing:
+
+```sh
+CSVTUI_UPDATE_GOLDEN=1 ./build/csvtui_tests
+git diff tests/golden
 ```
 
 The pty harness types accented characters, control bytes and overlong strings

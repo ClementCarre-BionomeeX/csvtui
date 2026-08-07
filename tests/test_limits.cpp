@@ -53,20 +53,20 @@ TEST(RowCountEstimateIsCloseWithoutScanning) {
   CHECK_EQ(model.EstimatedRowCount(), size_t{5000}); // exact once known
 }
 
-// Phase 0: sorting a huge file must refuse rather than exhaust memory.
+// Sorting a huge file must refuse rather than exhaust memory. Since keys spill
+// to disk, the only thing that has to fit is the resulting order.
 TEST(SortIsRefusedWhenItWouldNotFit) {
   TempCSV file(ManyRows(5000));
   CSVModel model;
   CHECK_EQ(model.Open(file.path(), {}, {}), std::string(""));
 
   const size_t rows = model.EstimatedRowCount();
-  const size_t needed = rows * CSVModel::kSortBytesPerRow;
-  CHECK_EQ(model.EstimatedSortBytes(), needed);
+  CHECK_EQ(model.EstimatedSortBytes(), rows * CSVModel::kSortOutputBytesPerRow);
 
   // Plenty of room: allowed.
-  CHECK_EQ(model.CheckSortFeasible(needed * 10), std::string(""));
-  // Not enough room: refused, and the message must carry the numbers.
-  const std::string refusal = model.CheckSortFeasible(needed / 4);
+  CHECK_EQ(model.CheckSortFeasible(4ull * 1024 * 1024 * 1024), std::string(""));
+  // Not enough room even for the working buffer: refused, with the numbers.
+  const std::string refusal = model.CheckSortFeasible(1024 * 1024);
   CHECK(!refusal.empty());
   CHECK(refusal.find("sorting") != std::string::npos);
   CHECK(refusal.find("filter") != std::string::npos);
@@ -74,16 +74,63 @@ TEST(SortIsRefusedWhenItWouldNotFit) {
   CHECK_EQ(model.CheckSortFeasible(0), std::string(""));
 }
 
-TEST(FilterIsCheaperThanSort) {
+// The point of spilling: a row count that used to be hopeless is now ordinary.
+// 156M rows is roughly a 12 GB export.
+TEST(AVeryLargeSortIsNoLongerRefusedOutright) {
+  const size_t rows = 156000000;
+  const size_t keys_in_memory = rows * CSVModel::kSortKeyBytesPerRow;
+  const size_t answer_only = rows * CSVModel::kSortOutputBytesPerRow;
+
+  // Holding every key would have wanted about nine gigabytes; the answer alone
+  // wants a little over one.
+  CHECK(keys_in_memory > 9ull * 1000 * 1000 * 1000);
+  CHECK(answer_only < 1400ull * 1000 * 1000);
+
+  // On a 4 GB budget the old requirement fails and the new one passes.
+  const size_t budget = static_cast<size_t>(4ull * 1024 * 1024 * 1024 *
+                                            CSVModel::kMemoryBudgetShare);
+  CHECK(keys_in_memory > budget);
+  CHECK(answer_only + CSVModel::kMinSortBufferBytes < budget);
+}
+
+TEST(SortBudgetIsWhatIsLeftAfterTheAnswer) {
   TempCSV file(ManyRows(5000));
   CSVModel model;
   CHECK_EQ(model.Open(file.path(), {}, {}), std::string(""));
-  CHECK(model.EstimatedFilterBytes() < model.EstimatedSortBytes());
 
-  const size_t budget = model.EstimatedSortBytes();
-  // A budget that blocks sorting can still allow filtering.
-  CHECK(!model.CheckSortFeasible(budget).empty());
-  CHECK_EQ(model.CheckFilterFeasible(budget), std::string(""));
+  // Roomy machine: the buffer is capped rather than allowed to grow forever.
+  CHECK_EQ(model.SortMemoryBudget(64ull * 1024 * 1024 * 1024),
+           CSVModel::kMaxSortBufferBytes);
+  // Cramped machine: never below the floor, so a sort always makes progress.
+  CHECK_EQ(model.SortMemoryBudget(1024), CSVModel::kMinSortBufferBytes);
+  // The budget always leaves room for the order it is going to produce.
+  const size_t available = 200u * 1024 * 1024;
+  const size_t budget = model.SortMemoryBudget(available);
+  const size_t share =
+      static_cast<size_t>(static_cast<double>(available) *
+                          CSVModel::kMemoryBudgetShare);
+  CHECK(budget + model.EstimatedSortBytes() <= share ||
+        budget == CSVModel::kMinSortBufferBytes);
+}
+
+// Sorting used to hold a key per row and so cost several times what filtering
+// did. Spilling changed the shape of that: what a sort keeps is the answer,
+// which is smaller per row than a filter's index, and what it adds instead is
+// one fixed working buffer that does not grow with the file.
+TEST(SortCostsAFixedBufferRatherThanMorePerRow) {
+  CHECK(CSVModel::kSortOutputBytesPerRow < CSVModel::kFilterBytesPerRow);
+  CHECK(CSVModel::kSortKeyBytesPerRow > CSVModel::kFilterBytesPerRow);
+
+  TempCSV file(ManyRows(5000));
+  CSVModel model;
+  CHECK_EQ(model.Open(file.path(), {}, {}), std::string(""));
+  CHECK(model.EstimatedSortBytes() < model.EstimatedFilterBytes());
+
+  // On a small machine the fixed buffer is what a sort gets refused for, while
+  // a filter of the same file still goes ahead.
+  const size_t cramped = 4u * 1024 * 1024;
+  CHECK(!model.CheckSortFeasible(cramped).empty());
+  CHECK_EQ(model.CheckFilterFeasible(cramped), std::string(""));
 }
 
 TEST(PositionFractionNeedsNoRowCount) {

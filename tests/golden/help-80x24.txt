@@ -1,0 +1,24 @@
+id╭ csvtui — keys ───────────────────────────────────────────────────────────╮
+──│h j k l / ←↓↑→                move cursor                                 │──
+  │Ctrl-D / Ctrl-U               half page down / up                         │
+  │Ctrl-F / Ctrl-B / PgDn / PgUp full page down / up                         │
+  │gg / G                        first / last row                            │
+  │<n>G                          go to row n                                 │
+  │0 / $                         first / last column                         │
+  │/ then Enter                  search forward (smart case)                 │
+  │n / N                         next / previous match                       │
+  │f then Enter                  filter rows, empty pattern clears           │
+  │s / S                         sort by cursor column asc / desc            │
+  │u                             clear sort and filter                       │
+  │x                             hide cursor column                          │
+  │X                             show all columns                            │
+  │z                             freeze columns up to the cursor             │
+  │Enter                         show the full cell value                    │
+  │y                             copy cell to the clipboard                  │
+  │c                             column statistics                           │
+  │H                             pin / unpin the header                      │
+  │t                             toggle aligned / raw mode                   │
+  │?                             toggle this help                            │
+  │Esc                           close overlay, clear search, cancel counting│
+  ╰──────────────────────────────────────────────────────────────────────────╯
+ sample.csv │ row 1/6 (0%) │  col 1/5 id  │ delim ','            ? help  q quit

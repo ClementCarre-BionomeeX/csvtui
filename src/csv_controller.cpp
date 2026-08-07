@@ -252,7 +252,10 @@ void CSVController::PollScanner() {
 
   if (scanner_.state() == CSVScanner::State::Failed) {
     scanner_.Join();
-    SetMessage("could not read " + model_.path(), true);
+    // A sort that ran out of temporary disk space has something specific to
+    // say; anything else was a problem reading the file itself.
+    const std::string &reason = scanner_.error();
+    SetMessage(reason.empty() ? "could not read " + model_.path() : reason, true);
     task_ = Task::None;
     cancel_requested_ = false;
     return;
@@ -272,13 +275,16 @@ void CSVController::PollScanner() {
     // A pass whose result nobody is waiting for — but it still counted the
     // file on its way through, so keep that much.
     model_.AdoptIndex(std::move(result.offsets), result.total_rows);
+    model_.SaveIndex();
     cancel_requested_ = false;
     return;
   }
 
   // Every full pass yields the offset table and the exact row count, whatever
-  // it was actually asked for.
+  // it was actually asked for. Keeping it means the next session starts with
+  // the file already counted.
   model_.AdoptIndex(std::move(result.offsets), result.total_rows);
+  model_.SaveIndex();
   FinishScan(result);
 }
 

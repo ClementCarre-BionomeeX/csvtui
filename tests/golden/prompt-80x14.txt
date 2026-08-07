@@ -1,0 +1,14 @@
+id │name        │city     │role  │score
+────────────────────────────────────────────────────────────────────────────────
+  1│Alice       │Genève   │Admin │    7
+  2│Bob         │Zürich   │Editor│   42
+  3│Dupont, Jean│Paris    │      │ 1000
+  4│中文字      │Lyon     │Viewer│    8
+  5│Eve         │Besançon │Admin │
+  6│Frank       │Neuchâtel│Editor│    3
+
+
+
+
+ sample.csv │ row 1/6 (0%) │  col 1/5 id  │ delim ','            ? help  q quit
+/Gen

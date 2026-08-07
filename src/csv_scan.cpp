@@ -1,6 +1,7 @@
 #include "csv_scan.h"
 
 #include "csv_parser.h"
+#include "csv_sortrun.h"
 
 #include <algorithm>
 #include <utility>
@@ -12,40 +13,7 @@ namespace {
 // enough that waking the UI is not the bottleneck.
 constexpr size_t kReportEveryRows = 200000;
 
-// One row's sort key. The column value is extracted once so that comparison
-// never touches the file, and the row number rides along so the permutation
-// falls out of the sort itself rather than needing a second index array.
-struct SortKey {
-  std::string text;
-  double number = 0.0;
-  size_t row = 0;
-  bool numeric = false;
-};
-
-// Ordering keys directly, rather than sorting an index that points at them.
-//
-// The row number is the final tiebreak, which makes this a total order and so
-// makes plain std::sort produce exactly what std::stable_sort would. That
-// matters for more than tidiness: stable_sort asks for a temporary buffer as
-// large as the data, and on a file with tens of millions of rows that buffer
-// was doubling the peak memory of a sort.
-struct KeyOrder {
-  bool descending = false;
-
-  bool operator()(const SortKey &a, const SortKey &b) const {
-    if (a.numeric != b.numeric)
-      return a.numeric; // numbers before text, whichever way we are sorting
-    if (a.numeric) {
-      if (a.number != b.number)
-        return descending ? b.number < a.number : a.number < b.number;
-    } else if (a.text != b.text) {
-      return descending ? b.text < a.text : a.text < b.text;
-    }
-    // Equal keys keep file order, so sorting by one column and then another
-    // refines the result rather than scrambling it.
-    return a.row < b.row;
-  }
-};
+using csvsort::Key;
 
 } // namespace
 
@@ -72,9 +40,13 @@ Outcome Run(const Request &request, Result &out,
   const bool collecting_keys = request.want_order && request.sort;
   const bool collecting_rows = request.want_order && !request.sort && filtering;
 
-  std::vector<size_t> kept;  // rows surviving the filter, in file order
-  std::vector<SortKey> keys; // one per row of the sorted view
-  size_t kept_count = 0;     // counted separately: `kept` may not be in use
+  std::vector<size_t> kept; // rows surviving the filter, in file order
+  std::vector<Key> keys;    // one per row of the sorted view, until it spills
+  size_t kept_count = 0;    // counted separately: `kept` may not be in use
+
+  const csvsort::Order order{request.sort_descending};
+  csvsort::RunStore runs(csvsort::TempDirectory());
+  size_t key_bytes = 0; // approximate footprint of `keys`
 
   // Size the key vector once rather than doubling it a dozen times: during a
   // doubling both buffers are live, and on a large file that copy is the peak
@@ -83,9 +55,14 @@ Outcome Run(const Request &request, Result &out,
   //
   // Only without a filter, where the row count is also the key count. A filter
   // usually keeps a small fraction, and reserving the whole file for it would
-  // waste far more than the growth it avoids.
-  if (request.expected_rows > 0 && collecting_keys && !filtering)
-    keys.reserve(request.expected_rows);
+  // waste far more than the growth it avoids. And never past the budget, which
+  // is the whole point of having one.
+  if (request.expected_rows > 0 && collecting_keys && !filtering) {
+    size_t want = request.expected_rows;
+    if (request.sort_memory_budget > 0)
+      want = std::min(want, request.sort_memory_budget / sizeof(Key));
+    keys.reserve(want);
+  }
 
   double sum = 0.0;
   bool first_number = true;
@@ -142,12 +119,24 @@ Outcome Run(const Request &request, Result &out,
     if (keep) {
       ++kept_count;
       if (collecting_keys) {
-        SortKey key;
+        Key key;
         key.row = index;
         csv::ExtractField(record, request.delimiter, request.sort_column,
                           key.text, scratch);
         key.numeric = csv::ParseNumber(key.text, key.number);
+        key_bytes += csvsort::KeyBytes(key);
         keys.push_back(std::move(key));
+
+        // Buffer full: sort what we have, write it out, and start again. This
+        // is what stops a sort's memory from following the file's size.
+        if (request.sort_memory_budget > 0 &&
+            key_bytes >= request.sort_memory_budget) {
+          if (!runs.Spill(keys, order)) {
+            out.error = runs.error();
+            return Outcome::Failed;
+          }
+          key_bytes = 0;
+        }
       } else if (collecting_rows) {
         kept.push_back(index);
       }
@@ -186,10 +175,22 @@ Outcome Run(const Request &request, Result &out,
     out.stats.mean = sum / static_cast<double>(out.stats.numeric);
 
   if (collecting_keys) {
-    std::sort(keys.begin(), keys.end(), KeyOrder{request.sort_descending});
-    out.order.reserve(keys.size());
-    for (const SortKey &key : keys)
-      out.order.push_back(key.row);
+    out.order.reserve(kept_count);
+    if (runs.empty()) {
+      // Everything fit: no spilling, no merge, no temporary files.
+      std::sort(keys.begin(), keys.end(), order);
+      for (const Key &key : keys)
+        out.order.push_back(key.row);
+    } else {
+      out.spilled_runs = runs.run_count() + (keys.empty() ? 0 : 1);
+      if (!runs.Merge(keys, order, out.order, cancelled)) {
+        if (!runs.error().empty()) {
+          out.error = runs.error();
+          return Outcome::Failed;
+        }
+        return Outcome::Cancelled;
+      }
+    }
     keys.clear();
     keys.shrink_to_fit();
     out.has_order = true;
@@ -217,6 +218,7 @@ void CSVScanner::Start(Request request, std::function<void()> notify) {
   Join(); // reap a previous run
 
   request_ = request;
+  error_.clear();
   cancel_.store(false, std::memory_order_release);
   progress_.store(0.0, std::memory_order_relaxed);
   rows_seen_.store(0, std::memory_order_relaxed);
@@ -262,6 +264,10 @@ void CSVScanner::Run(Request request, std::function<void()> notify) {
   if (outcome == csvscan::Outcome::Done) {
     std::lock_guard<std::mutex> lock(result_mutex_);
     result_ = std::move(scanned);
+  } else {
+    // Written before the state is published, so a reader that sees Failed
+    // sees the reason too.
+    error_ = std::move(scanned.error);
   }
 
   switch (outcome) {

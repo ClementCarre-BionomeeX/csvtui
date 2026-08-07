@@ -1,0 +1,14 @@
+id │name        │city     │role  │score
+────────────────────────────╭ name — row 3 ───────╮─────────────────────────────
+  1│Alice       │Genève   │A│Dupont, Jean         │
+  2│Bob         │Zürich   │E│                     │
+  3│Dupont, Jean│Paris    │ │Enter or Esc to close│
+  4│中文字      │Lyon     │V╰─────────────────────╯
+  5│Eve         │Besançon │Admin │
+  6│Frank       │Neuchâtel│Editor│    3
+ sample.csv │ row 3/6 (33%) │  col 2/5 name  │ delim ','         ? help  q quit
+
+
+
+
+

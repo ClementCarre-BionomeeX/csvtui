@@ -1,5 +1,6 @@
 #include "csv_model.h"
 
+#include "csv_cache.h"
 #include "csv_parser.h"
 #include "csv_system.h"
 
@@ -81,7 +82,11 @@ std::string CSVModel::Open(const std::string &path,
   chunk_offsets_.push_back(data_offset_);
 
   SampleColumnMetadata();
-  RefineAverageRecordBytes();
+  // A previous session may already have counted this file. Loading its index
+  // makes the row count exact before the first frame is drawn; failing to
+  // costs nothing but the estimate.
+  if (!LoadIndex())
+    RefineAverageRecordBytes();
   return std::string();
 }
 
@@ -153,6 +158,7 @@ void CSVModel::ResetDerivedState() {
   lru_pos_.clear();
   total_rows_ = 0;
   total_rows_known_ = false;
+  count_from_cache_ = false;
   file_size_ = 0;
   average_record_bytes_ = 0.0;
   column_widths_.clear();
@@ -482,11 +488,32 @@ double CSVModel::PositionFraction(size_t view_index) const {
 }
 
 size_t CSVModel::EstimatedSortBytes() const {
-  return EstimatedRowCount() * kSortBytesPerRow;
+  // What a sort must hold no matter how large the file is: the answer. Keys
+  // spill to disk once the buffer is full, so they no longer scale the cost.
+  return EstimatedRowCount() * kSortOutputBytesPerRow;
 }
 
 size_t CSVModel::EstimatedFilterBytes() const {
   return EstimatedRowCount() * kFilterBytesPerRow;
+}
+
+size_t CSVModel::SortMemoryBudget(size_t available_bytes) const {
+  if (available_bytes == 0)
+    return kMaxSortBufferBytes; // unknown: use the cap and let the OS complain
+  const size_t budget =
+      static_cast<size_t>(static_cast<double>(available_bytes) * kMemoryBudgetShare);
+  const size_t output = EstimatedSortBytes();
+  if (budget <= output)
+    return kMinSortBufferBytes;
+  // Whatever is left after the answer itself, within reason. A bigger buffer
+  // means fewer runs to merge, but past a point it only trades one kind of
+  // pressure for another.
+  const size_t spare = budget - output;
+  return std::clamp(spare, kMinSortBufferBytes, kMaxSortBufferBytes);
+}
+
+size_t CSVModel::SortMemoryBudget() const {
+  return SortMemoryBudget(csv::AvailableMemoryBytes());
 }
 
 namespace {
@@ -506,7 +533,10 @@ std::string CSVModel::CheckSortFeasible(size_t available_bytes) const {
     return std::string(); // unknown: do not stand in the user's way
   const size_t budget =
       static_cast<size_t>(static_cast<double>(available_bytes) * kMemoryBudgetShare);
-  const size_t needed = EstimatedSortBytes();
+  // Only the resulting order has to fit: the keys go to disk as they are made.
+  // A sort that would once have been refused for wanting 9 GB of keys now asks
+  // for the eight bytes a row that the answer costs.
+  const size_t needed = EstimatedSortBytes() + kMinSortBufferBytes;
   if (needed <= budget)
     return std::string();
   return RefusalMessage("sorting", EstimatedRowCount(), needed, budget,
@@ -540,6 +570,50 @@ void CSVModel::AdoptIndex(std::vector<std::streampos> offsets,
   chunk_offsets_ = std::move(offsets);
   total_rows_ = total_rows;
   total_rows_known_ = true;
+  count_from_cache_ = false;
+}
+
+bool CSVModel::LoadIndex() {
+  // Piped input lives in a temporary file that will not exist next time, and
+  // whose name says nothing about what it held.
+  if (!file_.is_open() || real_path_.empty() || real_path_ != display_path_)
+    return false;
+
+  csvcache::Key key;
+  if (!csvcache::DescribeFile(real_path_, delimiter_, has_header_, kChunkSize,
+                              key))
+    return false;
+
+  csvcache::Index index;
+  if (!csvcache::Load(key, index))
+    return false;
+  // The first offset must be where this model thinks the data starts, or the
+  // two disagree about the header.
+  if (index.offsets.front() != data_offset_)
+    return false;
+
+  chunk_offsets_ = std::move(index.offsets);
+  total_rows_ = index.total_rows;
+  total_rows_known_ = true;
+  count_from_cache_ = true;
+  return true;
+}
+
+bool CSVModel::SaveIndex() const {
+  if (!total_rows_known_ || count_from_cache_ || chunk_offsets_.empty())
+    return false; // nothing new to record
+  if (real_path_.empty() || real_path_ != display_path_)
+    return false;
+
+  csvcache::Key key;
+  if (!csvcache::DescribeFile(real_path_, delimiter_, has_header_, kChunkSize,
+                              key))
+    return false;
+
+  csvcache::Index index;
+  index.offsets = chunk_offsets_;
+  index.total_rows = total_rows_;
+  return csvcache::Save(key, index);
 }
 
 bool CSVModel::ColumnIsNumeric(size_t col) const {
@@ -670,6 +744,7 @@ void CSVModel::DescribeScan(csvscan::Request &request) const {
   request.delimiter = delimiter_;
   request.chunk_size = kChunkSize;
   request.expected_rows = EstimatedRowCount();
+  request.sort_memory_budget = SortMemoryBudget();
 }
 
 void CSVModel::AdoptView(const ViewState &state, std::vector<size_t> order,

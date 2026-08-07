@@ -1,0 +1,10 @@
+id │name               ›
+────────────────────────
+  1│Alice
+  2│Bob
+  3│Dupont, Jean
+  4│中文字
+  5│Eve
+  6│Frank
+ row 2/6 (17%)
+
