@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+- **Write the current view to a file** with `w`: the rows the filter and sort
+  have left, with the columns not hidden, quoted so it reads back unchanged and
+  using the delimiter the source had. Runs on a worker with progress, refuses to
+  overwrite an existing file, and removes the partial one if cancelled.
+- **Search says how many matches there are.** The jump still happens at the
+  first hit; the total needs a full pass, so it runs afterwards on its own file
+  handle and arrives a moment later without blocking anything.
+- **Columns can be resized.** `<` and `>` adjust the cursor column, `=` fits it
+  to what is on screen, `X` restores the sampled widths. Widths are sampled from
+  the first thousand rows so the table does not reflow while scrolling; these are
+  for when that guess is wrong.
+- **An active filter now outranks the cursor column in the status bar.** A
+  filtered *and* sorted view used to drop the filter to make room, leaving the
+  row count as the only hint that what was on screen was not the whole file.
+- **The help overlay no longer hides keys.** Twenty-four bindings in a
+  twenty-four row terminal silently lost the last three — which included `Esc`
+  and `q`, so the overlay explaining the keys was concealing how to quit. It is
+  now two columns, and a test asserts every binding appears.
+
 ## 0.3.0 — 2026-08-07
 
 The release where csvtui became usable on the files it was built for. Every

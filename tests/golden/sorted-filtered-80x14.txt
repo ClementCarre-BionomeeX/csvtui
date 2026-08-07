@@ -10,5 +10,5 @@ id │name        │city     │role  │score
 
 
 
- sample.csv │ row 1/2 (0%) │  col 5/5 score  │ sort ↓ score      ? help  q quit
+ sample.csv │ row 1/2 (0%) │  col 5/5 score  │ filter 'Admin'    ? help  q quit
 

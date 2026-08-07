@@ -60,10 +60,18 @@ is accepted: a search produces a cursor position, so moving the cursor while it
 looks for one has no meaning.
 .TP
 .BR n ", " N
-Next or previous match.
+Next or previous match. The jump happens as soon as a hit is found; the total
+number of matches requires a full pass and arrives separately.
 .TP
 .B f
 Filter rows to those matching a pattern. An empty pattern clears the filter.
+.TP
+.B w
+Write the current view to a new file: the rows the filter and sort have left,
+with the columns not hidden, quoted so that it reads back unchanged and using
+the delimiter the source was read with. Refuses to overwrite an existing file.
+Runs on a worker thread and removes the partial file if cancelled with
+.BR Esc .
 .TP
 .BR s ", " S
 Sort by the cursor column, ascending or descending. Numeric columns sort
@@ -77,6 +85,15 @@ Hide the cursor column, or show all columns again.
 .TP
 .B z
 Freeze the columns up to the cursor so they stay visible when scrolling right.
+.TP
+.BR < ", " >
+Narrow or widen the cursor column. Widths are otherwise sampled from the first
+thousand rows, which is wrong when a long value first appears much later.
+.TP
+.B =
+Fit the cursor column to the widest value currently on screen.
+.B X
+restores every column to its sampled width.
 .TP
 .B Enter
 Show the full value of the current cell.

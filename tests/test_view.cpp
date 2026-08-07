@@ -201,6 +201,26 @@ TEST(ViewRendersTheHelpOverlay) {
   CheckAgainstGolden("help-80x24", fixture.Render(80, 24));
 }
 
+// The overlay that explains the keys must not hide any of them. It used to:
+// twenty-four bindings in a twenty-four row terminal silently lost the last
+// three, which included Esc and q, so the help was concealing how to quit.
+TEST(ViewHelpShowsEveryBinding) {
+  Fixture fixture;
+  fixture.view().ToggleHelp();
+  const std::string screen = fixture.Render(80, 24);
+
+  for (const char *key : {"h j k l", "Ctrl-D", "Ctrl-F", "PgDn", "gg / G",
+                          "<n>G", "0 / $", "/ then Enter", "n / N",
+                          "f then Enter", "w then Enter", "s / S", "u",
+                          "x / X", "z", "< / >", "=", "Enter", "y", "c", "H",
+                          "t", "?", "Esc", "q", "mouse"}) {
+    if (screen.find(key) == std::string::npos) {
+      ++Failures();
+      std::cerr << "    FAIL help overlay does not show \"" << key << "\"\n";
+    }
+  }
+}
+
 TEST(ViewRendersTheCellDetail) {
   Fixture fixture;
   fixture.view().SetCursor(2, 1); // the quoted "Dupont, Jean"
@@ -236,6 +256,24 @@ TEST(ViewRendersASortedAndFilteredStatus) {
   fixture.model().SortByColumn(4, true);
   fixture.view().SetCursor(0, 4);
   CheckAgainstGolden("sorted-filtered-80x14", fixture.Render(80, 14));
+}
+
+// A filter changes which rows exist, so it outranks the cursor column and the
+// sort for the space in the status bar. Losing it used to leave the row count
+// as the only hint that what was on screen was not the whole file.
+TEST(ViewKeepsTheFilterInTheStatusBarWhenSpaceIsShort) {
+  Fixture fixture;
+  fixture.model().ApplyFilter("Admin");
+  fixture.model().SortByColumn(4, true);
+  fixture.view().SetCursor(0, 4);
+
+  const std::string narrow = fixture.Render(80, 14);
+  CHECK(narrow.find("filter 'Admin'") != std::string::npos);
+
+  // Given room, both are shown; the ranking only decides what to drop.
+  const std::string wide = fixture.Render(120, 14);
+  CHECK(wide.find("filter 'Admin'") != std::string::npos);
+  CHECK(wide.find("sort") != std::string::npos);
 }
 
 // Not a golden: a property. Whatever the contents, nothing may spill past the

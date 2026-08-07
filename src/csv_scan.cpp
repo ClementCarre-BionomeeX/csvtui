@@ -39,6 +39,10 @@ Outcome Run(const Request &request, Result &out,
   const bool ignore_case =
       filtering && csv::SmartCaseInsensitive(request.filter_pattern);
 
+  const bool counting = !request.count_pattern.empty();
+  const bool count_ignore_case =
+      counting && csv::SmartCaseInsensitive(request.count_pattern);
+
   // Only one of these is ever populated: a sort needs a key per row, a plain
   // filter needs just the row numbers, and a stats pass needs neither.
   const bool collecting_keys = request.want_order && request.sort;
@@ -126,6 +130,10 @@ Outcome Run(const Request &request, Result &out,
 
     if (keep) {
       ++kept_count;
+      if (counting &&
+          csv::RecordContains(record, request.delimiter, request.count_pattern,
+                              count_ignore_case, scratch))
+        ++out.matches;
       if (collecting_keys) {
         Key key;
         key.row = index;

@@ -47,7 +47,11 @@ NASTY_INPUT = [
 # Keys the viewer actually binds, weighted towards navigation because that is
 # what a session mostly is.
 NAVIGATION = list("hjkl") * 4 + ["gg", "G", "0", "$", "\x04", "\x15", "\x06", "\x02"]
-COMMANDS = list("nNsSuxXzHtc?y") + ["\r", "\x1b"]
+COMMANDS = list("nNsSuxXzHtc?y<>=") + ["\r", "\x1b"]
+
+# `/` and `f` only. `w` is deliberately absent: it opens the write-a-file
+# prompt, and a harness that types random bytes into that would be creating
+# files at arbitrary paths on whatever machine it runs on.
 PROMPTS = ["/", "f"]
 
 HEADER = "id,name,email,city,role,score,note\n"

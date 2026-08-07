@@ -56,6 +56,12 @@ struct Request {
   bool want_stats = false;
   size_t stats_column = 0;
 
+  // Count rows that match this as well as the filter, without building an
+  // ordering. Used to answer "how many matches" after a search: the search
+  // itself stops at the first hit, so the total has to come from somewhere,
+  // and it can arrive late rather than not at all.
+  std::string count_pattern;
+
   // Roughly how many rows the file holds, used to size the key vector up
   // front. Growing it instead costs a doubling: the old and new buffers are
   // both live during the copy, which on a large file is the peak that decides
@@ -78,6 +84,8 @@ struct Result {
   std::vector<size_t> order;
   bool has_order = false;
   Stats stats;
+  // Rows matching `count_pattern`, within the filter if there was one.
+  size_t matches = 0;
   // How many sorted runs the sort had to spill. Zero means it fit in memory.
   size_t spilled_runs = 0;
   // Set when the outcome is Failed, saying what went wrong. Running out of

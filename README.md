@@ -87,10 +87,13 @@ Press `?` in the viewer for this list.
 | `/` | Search forward, then `Enter` |
 | `n` / `N` | Next / previous match |
 | `f` | Filter rows to those matching a pattern (empty clears) |
+| `w` | Write the rows on screen out to a new file |
 | `s` / `S` | Sort by the cursor column, ascending / descending |
 | `u` | Clear sort and filter |
 | `x` / `X` | Hide the cursor column / show all columns |
 | `z` | Freeze columns up to the cursor (they stay put when scrolling right) |
+| `<` / `>` | Narrow or widen the cursor column |
+| `=` | Fit the cursor column to what is on screen |
 | `Enter` | Show the full cell value |
 | `y` | Copy the cell to the clipboard (OSC 52, works over SSH) |
 | `c` | Column statistics: count, empties, min, max, mean |
@@ -103,7 +106,20 @@ The mouse works too: the wheel scrolls and a click moves the cursor.
 
 Search is *smart case*: an all-lowercase pattern matches case-insensitively, a
 pattern with any capital matches exactly. Searches wrap around the end of the
-file and say so in the status bar.
+file and say so in the status bar. The jump happens as soon as the first hit is
+found; the total number of matches needs a full pass and so arrives a moment
+later, on its own.
+
+Column widths are sampled from the first thousand rows so the table does not
+reflow as you scroll. When that guess is wrong — a long value appearing at row
+fifty thousand, clipped to an ellipsis — `<` and `>` adjust the cursor column
+and `=` fits it to what is currently on screen. `X` restores every column to
+its sampled width.
+
+`w` writes what you are looking at to a new file: the rows the filter and sort
+left, with the columns you have not hidden, quoted so it reads back unchanged
+and using the delimiter the source had. It refuses to overwrite an existing
+file, and removes the partial one if you cancel with `Esc`.
 
 ## Very large files
 

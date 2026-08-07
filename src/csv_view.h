@@ -2,6 +2,7 @@
 
 #include <ftxui/dom/elements.hpp>
 #include <optional>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -38,6 +39,16 @@ public:
   void SetCommandLine(const std::string &line);
   void SetStatusMessage(const std::string &message, bool is_error);
 
+  // Widths are sampled from the first thousand rows so the table stops
+  // reflowing as you scroll. That is the right trade until a long value first
+  // appears at row fifty thousand and is clipped with no way to see it, which
+  // is what these are for. Overrides survive until cleared.
+  void WidenColumn(size_t col, int by);
+  void FitColumnToScreen(size_t col, int height);
+  void ClearColumnWidth(size_t col);
+  bool ColumnWidthOverridden(size_t col) const;
+  int ColumnWidth(size_t col) const;
+
   void ToggleColumnHidden(size_t col);
   void ShowAllColumns();
   bool ColumnHidden(size_t col) const;
@@ -69,6 +80,7 @@ private:
   size_t first_column_ = 0;
   size_t frozen_columns_ = 0;
   std::set<size_t> hidden_columns_;
+  std::map<size_t, int> column_width_overrides_;
 
   std::string search_pattern_;
   bool search_ignore_case_ = false;
@@ -84,7 +96,6 @@ private:
   bool last_truncated_right_ = false;
 
   Layout ComputeLayout(int available_width) const;
-  int ColumnWidth(size_t col) const;
   ftxui::Element RenderCell(const std::string &raw, size_t col, int width,
                             bool is_header, bool cursor_cell,
                             std::optional<size_t> row_index) const;

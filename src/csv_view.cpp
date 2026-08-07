@@ -87,7 +87,10 @@ void CSVView::ToggleColumnHidden(size_t col) {
     hidden_columns_.erase(col);
 }
 
-void CSVView::ShowAllColumns() { hidden_columns_.clear(); }
+void CSVView::ShowAllColumns() {
+  hidden_columns_.clear();
+  column_width_overrides_.clear();
+}
 
 bool CSVView::ColumnHidden(size_t col) const {
   return hidden_columns_.count(col) > 0;
@@ -105,10 +108,53 @@ int CSVView::RowsThatFit(int height) const {
 }
 
 int CSVView::ColumnWidth(size_t col) const {
+  const auto override_it = column_width_overrides_.find(col);
+  if (override_it != column_width_overrides_.end())
+    return override_it->second;
+
   const auto &widths = model_.ColumnWidths();
   int width = col < widths.size() ? widths[col] : kMinColumnWidth;
   width = std::clamp(width, kMinColumnWidth, kMaxColumnWidth);
   return width;
+}
+
+void CSVView::WidenColumn(size_t col, int by) {
+  // The ceiling is deliberately higher than the sampled one: the whole point
+  // is to see a value the sampling decided was too long to show.
+  constexpr int kWidestByHand = 400;
+  const int width = std::clamp(ColumnWidth(col) + by, kMinColumnWidth,
+                               kWidestByHand);
+  column_width_overrides_[col] = width;
+}
+
+void CSVView::FitColumnToScreen(size_t col, int height) {
+  // What is actually on screen, header included — not what the first thousand
+  // rows happened to contain.
+  int widest = 0;
+  if (model_.has_header()) {
+    const std::vector<std::string> &header = model_.Header();
+    if (col < header.size())
+      widest = csv::DisplayWidth(csv::SanitizeForDisplay(header[col]));
+  }
+
+  const int rows = std::max(1, RowsThatFit(height));
+  std::vector<std::string> fields;
+  for (int i = 0; i < rows; ++i) {
+    if (!model_.GetRow(viewport_start_ + static_cast<size_t>(i), fields))
+      break;
+    if (col < fields.size()) {
+      widest = std::max(widest,
+                        csv::DisplayWidth(csv::SanitizeForDisplay(fields[col])));
+    }
+  }
+
+  column_width_overrides_[col] = std::max(widest, kMinColumnWidth);
+}
+
+void CSVView::ClearColumnWidth(size_t col) { column_width_overrides_.erase(col); }
+
+bool CSVView::ColumnWidthOverridden(size_t col) const {
+  return column_width_overrides_.count(col) != 0;
 }
 
 // --- layout -----------------------------------------------------------------
@@ -248,6 +294,8 @@ Element CSVView::RenderCell(const std::string &raw, size_t col, int width,
 // --- status -----------------------------------------------------------------
 
 Element CSVView::RenderStatusBar(int width) {
+  // Importance, lowest first: position (1), an active filter (2), the cursor
+  // column (3), the file name (4), an active sort (5), the delimiter (6).
   // Segments are added most-important first and dropped once the bar is full,
   // so a narrow terminal degrades to the position indicator rather than to a
   // row of half-cut labels.
@@ -285,23 +333,26 @@ Element CSVView::RenderStatusBar(int width) {
   segments.push_back({" " + more_left + "col " + std::to_string(cursor_col_ + 1) +
                           "/" + std::to_string(columns) + " " +
                           model_.ColumnName(cursor_col_) + more_right + " ",
-                      Color::White, false, 2});
+                      Color::White, false, 3});
 
   std::string name = model_.path();
   const size_t slash = name.find_last_of('/');
   if (slash != std::string::npos)
     name = name.substr(slash + 1);
-  segments.insert(segments.begin(), {" " + name + " ", Color::White, false, 3});
+  segments.insert(segments.begin(), {" " + name + " ", Color::White, false, 4});
 
   if (model_.sort_active()) {
     segments.push_back({std::string(" sort ") +
                             (model_.sort_descending() ? "↓ " : "↑ ") +
                             model_.ColumnName(model_.sort_column()) + " ",
-                        Color::GreenLight, true, 4});
+                        Color::GreenLight, true, 5});
   }
   if (model_.filter_active()) {
+    // Ranked above the column indicator on purpose. A filter changes which
+    // rows exist; losing it to make room left the row count as the only hint
+    // that what is on screen is not the whole file.
     segments.push_back({" filter '" + model_.filter_pattern() + "' ",
-                        Color::MagentaLight, true, 4});
+                        Color::MagentaLight, true, 2});
   }
 
   std::string delim_label(1, model_.delimiter());
@@ -359,43 +410,66 @@ Element CSVView::RenderHelp() const {
     const char *keys;
     const char *what;
   };
+  // Two columns, because one does not fit. Twenty-four bindings in a
+  // twenty-four row terminal silently lost the last three, which were Esc, q
+  // and the mouse — that is, the overlay explaining the keys was hiding how to
+  // quit. Descriptions are terse to earn the second column; the man page has
+  // the long form.
   static const Row rows[] = {
       {"h j k l / ←↓↑→", "move cursor"},
-      {"Ctrl-D / Ctrl-U", "half page down / up"},
-      {"Ctrl-F / Ctrl-B / PgDn / PgUp", "full page down / up"},
+      {"Ctrl-D / Ctrl-U", "half page"},
+      {"Ctrl-F / Ctrl-B", "full page"},
+      {"PgDn / PgUp", "full page"},
       {"gg / G", "first / last row"},
       {"<n>G", "go to row n"},
       {"0 / $", "first / last column"},
-      {"/ then Enter", "search forward (smart case)"},
-      {"n / N", "next / previous match"},
-      {"f then Enter", "filter rows, empty pattern clears"},
-      {"s / S", "sort by cursor column asc / desc"},
-      {"u", "clear sort and filter"},
-      {"x", "hide cursor column"},
-      {"X", "show all columns"},
-      {"z", "freeze columns up to the cursor"},
-      {"Enter", "show the full cell value"},
-      {"y", "copy cell to the clipboard"},
+      {"/ then Enter", "search forward"},
+      {"n / N", "next / prev match"},
+      {"f then Enter", "filter rows"},
+      {"w then Enter", "write view to a file"},
+      {"s / S", "sort by column"},
+      {"u", "clear sort / filter"},
+      {"x / X", "hide / show columns"},
+      {"z", "freeze to cursor"},
+      {"< / >", "narrow / widen column"},
+      {"=", "fit column to screen"},
+      {"Enter", "show full cell"},
+      {"y", "copy cell"},
       {"c", "column statistics"},
-      {"H", "pin / unpin the header"},
-      {"t", "toggle aligned / raw mode"},
+      {"H", "pin / unpin header"},
+      {"t", "aligned / raw mode"},
       {"?", "toggle this help"},
-      {"Esc", "close overlay, clear search, cancel counting"},
+      {"Esc", "close / cancel"},
       {"q", "quit"},
-      {"mouse", "wheel scrolls, click moves the cursor"},
+      {"mouse", "scroll and click"},
+  };
+  constexpr size_t kRowCount = sizeof(rows) / sizeof(rows[0]);
+
+  const auto entry = [](const Row &row) {
+    return hbox({
+        text(row.keys) | color(Color::Cyan) | size(WIDTH, EQUAL, 17),
+        text(row.what),
+    });
   };
 
-  std::vector<Element> lines;
-  for (const auto &row : rows) {
-    lines.push_back(hbox({
-        text(row.keys) | color(Color::Cyan) | size(WIDTH, EQUAL, 30),
-        text(row.what),
-    }));
-  }
+  const size_t half = (kRowCount + 1) / 2;
+  std::vector<Element> left, right;
+  for (size_t i = 0; i < kRowCount; ++i)
+    (i < half ? left : right).push_back(entry(rows[i]));
+  // Keep the columns the same length so the frame does not jump about.
+  while (right.size() < left.size())
+    right.push_back(text(""));
 
-  return window(text(" csvtui — keys ") | bold, vbox(std::move(lines))) |
+  Element body = hbox({
+      vbox(std::move(left)) | size(WIDTH, EQUAL, 38),
+      separator(),
+      vbox(std::move(right)) | size(WIDTH, EQUAL, 38),
+  });
+
+  return window(text(" csvtui — keys ") | bold, std::move(body)) |
          bgcolor(Color::Black) | clear_under | center;
 }
+
 
 Element CSVView::RenderCellDetail() const {
   std::vector<std::string> fields;

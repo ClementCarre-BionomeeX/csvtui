@@ -6,7 +6,12 @@
 #include "csv_view.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
+#include <cstring>
+#include <fstream>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <cmath>
 #include <memory>
 #include <iomanip>
@@ -96,9 +101,9 @@ CSVController::CSVController(CSVModel &model, CSVView &view,
                             // While a search runs the model belongs to the
                             // worker, so this must not read it: draw the frame
                             // from before the search instead.
-                            PollSearch();
-                            if (searching_)
-                              return RenderWhileSearching();
+                            PollBlocking();
+                            if (blocking_ != Blocking::None)
+                              return RenderWhileBlocked();
 
                             // Recomputing here is what keeps the view correct
                             // when the terminal is resized: FTXUI re-renders on
@@ -115,8 +120,8 @@ CSVController::CSVController(CSVModel &model, CSVView &view,
 CSVController::~CSVController() {
   // The worker holds a reference to the model and posts to the screen; both
   // outlive it only if it is stopped first.
-  search_cancel_.store(true, std::memory_order_release);
-  JoinSearch();
+  blocking_cancel_.store(true, std::memory_order_release);
+  JoinBlocking();
 }
 
 Component CSVController::GetComponent() { return component_; }
@@ -351,6 +356,14 @@ void CSVController::FinishScan(csvscan::Result &result) {
   case Task::Stats:
     SetMessage(DescribeStats(task_column_, result.stats));
     break;
+  case Task::MatchCount:
+    match_total_ = result.matches;
+    match_total_known_ = true;
+    // Said rather than shouted: the jump already happened, and this is the
+    // number that could not be known at the time.
+    SetMessage(csv::HumanCount(match_total_) + " match(es) for '" +
+               match_pattern_ + "'");
+    break;
   case Task::None:
     break;
   }
@@ -382,6 +395,9 @@ void CSVController::UpdateCommandLine() {
   case InputMode::Filter:
     view_.SetCommandLine("filter: " + input_buffer_);
     break;
+  case InputMode::Export:
+    view_.SetCommandLine("write to: " + input_buffer_);
+    break;
   case InputMode::Normal:
     view_.SetCommandLine(std::string());
     break;
@@ -404,11 +420,65 @@ std::string CSVController::CurrentCellValue() {
 
 // --- actions ----------------------------------------------------------------
 
+void CSVController::StartBlocking(Blocking kind, const std::string &label,
+                                  std::function<void()> body) {
+  if (blocking_ != Blocking::None)
+    return;
+  JoinBlocking(); // reap a finished one
+
+  blocking_ = kind;
+  blocking_label_ = label;
+  blocking_message_ = label + "…";
+  blocking_cancel_.store(false, std::memory_order_release);
+  blocking_finished_.store(false, std::memory_order_release);
+  blocking_progress_.store(0, std::memory_order_relaxed);
+
+  // Whatever was on screen when the work began is what stays on screen: the
+  // model belongs to the worker now, and rendering the grid would read it.
+  const auto size = Terminal::Size();
+  frozen_frame_ = view_.Render(size.dimx, size.dimy);
+
+  blocking_thread_ = std::thread([this, body = std::move(body)] {
+    body();
+    blocking_finished_.store(true, std::memory_order_release);
+    screen_.PostEvent(ftxui::Event::Custom);
+  });
+}
+
+void CSVController::JoinBlocking() {
+  if (blocking_thread_.joinable())
+    blocking_thread_.join();
+}
+
+bool CSVController::BlockingCancelled() const {
+  return blocking_cancel_.load(std::memory_order_acquire);
+}
+
+std::function<void(size_t)> CSVController::BlockingReporter() {
+  auto last_wake = std::make_shared<std::chrono::steady_clock::time_point>(
+      std::chrono::steady_clock::now());
+  return [this, last_wake](size_t done) {
+    blocking_progress_.store(done, std::memory_order_relaxed);
+    const auto now = std::chrono::steady_clock::now();
+    if (now - *last_wake < std::chrono::milliseconds(100))
+      return;
+    *last_wake = now;
+    screen_.PostEvent(ftxui::Event::Custom);
+  };
+}
+
+bool CSVController::CancelBlocking() {
+  if (blocking_ == Blocking::None)
+    return false;
+  blocking_cancel_.store(true, std::memory_order_release);
+  blocking_message_ = "stopping " + blocking_label_ + "…";
+  return true;
+}
+
 void CSVController::StartSearch(const std::string &pattern, bool forward,
                                 bool from_cursor) {
-  if (pattern.empty() || searching_)
+  if (pattern.empty() || blocking_ != Blocking::None)
     return;
-  JoinSearch(); // reap a finished one
 
   const size_t row = from_cursor ? cursor_row_ : 0;
   const size_t col = from_cursor ? cursor_col_ : 0;
@@ -418,92 +488,178 @@ void CSVController::StartSearch(const std::string &pattern, bool forward,
   search_origin_row_ = row;
   search_origin_col_ = col;
   search_hit_.reset();
-  search_cancel_.store(false, std::memory_order_release);
-  search_finished_.store(false, std::memory_order_release);
-  search_examined_.store(0, std::memory_order_relaxed);
-  searching_ = true;
-
-  // Whatever was on screen when the search began is what stays on screen: the
-  // model belongs to the worker now, and rendering the grid would read it.
-  const auto size = Terminal::Size();
-  frozen_frame_ = view_.Render(size.dimx, size.dimy);
 
   CSVModel::SearchWatch watch;
-  watch.cancelled = [this] {
-    return search_cancel_.load(std::memory_order_acquire);
-  };
-  // Storing the count is free; waking the UI is not. The search offers a tick
-  // every couple of thousand rows, which is hundreds a second on a large file
-  // — far more redraws than anyone can see.
-  auto last_wake = std::make_shared<std::chrono::steady_clock::time_point>(
-      std::chrono::steady_clock::now());
-  watch.report = [this, last_wake](size_t examined) {
-    search_examined_.store(examined, std::memory_order_relaxed);
-    const auto now = std::chrono::steady_clock::now();
-    if (now - *last_wake < std::chrono::milliseconds(100))
-      return;
-    *last_wake = now;
-    screen_.PostEvent(ftxui::Event::Custom);
-  };
+  watch.cancelled = [this] { return BlockingCancelled(); };
+  watch.report = BlockingReporter();
 
-  search_thread_ = std::thread([this, pattern, forward, row, col, watch] {
-    search_hit_ = forward ? model_.FindNext(pattern, row, col, true, watch)
-                          : model_.FindPrev(pattern, row, col, true, watch);
-    search_finished_.store(true, std::memory_order_release);
-    screen_.PostEvent(ftxui::Event::Custom);
-  });
+  StartBlocking(Blocking::Search, "searching for '" + pattern + "'",
+                [this, pattern, forward, row, col, watch] {
+                  search_hit_ =
+                      forward ? model_.FindNext(pattern, row, col, true, watch)
+                              : model_.FindPrev(pattern, row, col, true, watch);
+                });
 }
 
-void CSVController::JoinSearch() {
-  if (search_thread_.joinable())
-    search_thread_.join();
-}
-
-bool CSVController::CancelSearch() {
-  if (!searching_)
-    return false;
-  search_cancel_.store(true, std::memory_order_release);
-  SetMessage("stopping search…");
-  return true;
-}
-
-void CSVController::PollSearch() {
-  if (!searching_)
+void CSVController::StartExport(const std::string &path) {
+  if (path.empty() || blocking_ != Blocking::None)
     return;
 
-  if (!search_finished_.load(std::memory_order_acquire)) {
-    spinner_frame_ = (spinner_frame_ + 1) % kSpinnerFrames;
-    const bool stopping = search_cancel_.load(std::memory_order_acquire);
-    search_message_ =
-        std::string(kSpinner[spinner_frame_]) + " searching for '" +
-        search_pattern_ + "'  (" +
-        csv::HumanCount(search_examined_.load(std::memory_order_relaxed)) +
-        " rows" + (stopping ? ", stopping…" : ", Esc to cancel") + ")";
+  // Refusing an existing file rather than prompting again: this is the one
+  // place csvtui writes anything, and quietly replacing a file the user
+  // already has would be the worst possible first impression of that.
+  struct stat info {};
+  if (::stat(path.c_str(), &info) == 0) {
+    SetMessage(path + " already exists — pick another name", true);
     return;
   }
 
-  JoinSearch();
-  searching_ = false;
+  export_path_ = path;
+  export_error_.clear();
+
+  // The columns on screen, in order. Hiding a column is part of the view, so
+  // the file written out matches what was being looked at.
+  std::vector<size_t> columns;
+  for (size_t col = 0; col < model_.ColumnCount(); ++col) {
+    if (!view_.ColumnHidden(col))
+      columns.push_back(col);
+  }
+  if (columns.empty()) {
+    SetMessage("every column is hidden — nothing to write", true);
+    return;
+  }
+
+  auto report = BlockingReporter();
+  StartBlocking(Blocking::Export, "writing " + path,
+                [this, path, columns, report] {
+                  export_error_ = WriteViewTo(path, columns, report);
+                });
+}
+
+std::string CSVController::WriteViewTo(const std::string &path,
+                                       const std::vector<size_t> &columns,
+                                       const std::function<void(size_t)> &report) {
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  if (!out.is_open())
+    return "cannot write " + path + ": " + std::strerror(errno);
+
+  const char delimiter = model_.delimiter();
+  std::string line;
+
+  if (model_.has_header()) {
+    const std::vector<std::string> &header = model_.Header();
+    for (size_t i = 0; i < columns.size(); ++i) {
+      if (i != 0)
+        line.push_back(delimiter);
+      const size_t col = columns[i];
+      csv::AppendQuoted(line, col < header.size() ? header[col] : std::string(),
+                        delimiter);
+    }
+    line.push_back('\n');
+    out << line;
+  }
+
+  std::vector<std::string> fields;
+  size_t written = 0;
+
+  // Walk the view until it runs out rather than asking how long it is: with a
+  // sort or filter in effect the ordering already knows where it ends, and
+  // without one this avoids counting the file just to write it.
+  for (size_t row = 0; model_.GetRow(row, fields); ++row) {
+    if (BlockingCancelled()) {
+      out.close();
+      ::unlink(path.c_str());
+      return std::string();
+    }
+
+    line.clear();
+    for (size_t i = 0; i < columns.size(); ++i) {
+      if (i != 0)
+        line.push_back(delimiter);
+      const size_t col = columns[i];
+      csv::AppendQuoted(line, col < fields.size() ? fields[col] : std::string(),
+                        delimiter);
+    }
+    line.push_back('\n');
+    out << line;
+    if (!out) {
+      out.close();
+      ::unlink(path.c_str());
+      return "writing " + path + " failed, probably out of disk space";
+    }
+
+    ++written;
+    if (report)
+      report(written);
+  }
+
+  out.flush();
+  if (!out) {
+    out.close();
+    ::unlink(path.c_str());
+    return "writing " + path + " failed, probably out of disk space";
+  }
+  if (report)
+    report(written);
+  return std::string();
+}
+
+void CSVController::PollBlocking() {
+  if (blocking_ == Blocking::None)
+    return;
+
+  if (!blocking_finished_.load(std::memory_order_acquire)) {
+    spinner_frame_ = (spinner_frame_ + 1) % kSpinnerFrames;
+    const size_t done = blocking_progress_.load(std::memory_order_relaxed);
+    const char *unit = blocking_ == Blocking::Export ? " rows written" : " rows";
+    blocking_message_ = std::string(kSpinner[spinner_frame_]) + " " +
+                        blocking_label_ + "  (" + csv::HumanCount(done) + unit +
+                        (BlockingCancelled() ? ", stopping…" : ", Esc to cancel") +
+                        ")";
+    return;
+  }
+
+  JoinBlocking();
+  const Blocking kind = blocking_;
+  const bool cancelled = BlockingCancelled();
+  blocking_ = Blocking::None;
   frozen_frame_ = ftxui::Element();
 
-  const bool cancelled = search_cancel_.load(std::memory_order_acquire);
-  auto hit = search_hit_;
-  search_hit_.reset();
-
-  if (cancelled) {
-    SetMessage("search cancelled", true);
-    return;
+  switch (kind) {
+  case Blocking::Search: {
+    auto hit = search_hit_;
+    search_hit_.reset();
+    if (cancelled) {
+      SetMessage("search cancelled", true);
+      break;
+    }
+    ApplySearchHit(search_pattern_, search_forward_, search_origin_row_,
+                   search_origin_col_, hit);
+    break;
   }
-  ApplySearchHit(search_pattern_, search_forward_, search_origin_row_,
-                 search_origin_col_, hit);
+  case Blocking::Export: {
+    const size_t written = blocking_progress_.load(std::memory_order_relaxed);
+    if (cancelled) {
+      SetMessage("writing cancelled — " + export_path_ + " removed", true);
+    } else if (!export_error_.empty()) {
+      SetMessage(export_error_, true);
+    } else {
+      SetMessage("wrote " + csv::HumanCount(written) + " row(s) to " +
+                 export_path_);
+    }
+    break;
+  }
+  case Blocking::None:
+    break;
+  }
 }
 
-ftxui::Element CSVController::RenderWhileSearching() {
-  // The frame from before the search, dimmed, with a live progress line laid
-  // over its last row. Dimming is the honest signal: the grid is real, and it
-  // is not going to answer you until the search finishes.
+ftxui::Element CSVController::RenderWhileBlocked() {
+  // The frame from before the work began, dimmed, with a live progress line
+  // laid over its last row. Dimming is the honest signal: the grid is real,
+  // and it is not going to answer you until this finishes.
   Element grid = frozen_frame_ ? (frozen_frame_ | dim) : filler();
-  Element line = vbox({filler(), text(search_message_) | color(Color::Yellow)});
+  Element line = vbox({filler(), text(blocking_message_) | color(Color::Yellow)});
   return dbox({std::move(grid), std::move(line)});
 }
 
@@ -539,6 +695,7 @@ void CSVController::ApplySearchHit(const std::string &pattern, bool forward,
   SetMessage(wrapped ? (forward ? "search wrapped to top" : "search wrapped to bottom")
                      : std::string());
   last_search_ = pattern;
+  StartMatchCount(pattern);
 }
 
 void CSVController::RepeatSearch(bool forward) {
@@ -619,6 +776,27 @@ void CSVController::YankCurrentCell() {
   SetMessage("copied " + std::to_string(value.size()) + " byte(s)");
 }
 
+void CSVController::StartMatchCount(const std::string &pattern) {
+  // Only worth doing once per pattern, and never at the cost of interrupting
+  // something the user actually asked for.
+  if (pattern.empty() || scanner_.running())
+    return;
+  if (match_total_known_ && match_pattern_ == pattern)
+    return;
+
+  match_pattern_ = pattern;
+  match_total_known_ = false;
+
+  csvscan::Request request;
+  model_.DescribeScan(request);
+  const CSVModel::ViewState view = model_.CurrentViewState();
+  request.filter = view.filter_active;
+  request.filter_pattern = view.filter_pattern;
+  request.count_pattern = pattern;
+
+  StartScan(Task::MatchCount, request, "counting matches for '" + pattern + "'");
+}
+
 void CSVController::ShowColumnStats() {
   const CSVModel::ViewState view = model_.CurrentViewState();
 
@@ -652,12 +830,12 @@ std::string CSVController::DescribeStats(size_t col,
 // --- event handling ---------------------------------------------------------
 
 bool CSVController::OnEvent(Event event) {
-  // A search owns the model while it runs, so nothing here may touch it. Esc
+  // A worker owns the model while it runs, so nothing here may touch it. Esc
   // stops it; everything else waits, which is also the only sensible answer to
   // "move the cursor" while something is looking for where to put the cursor.
-  if (searching_) {
+  if (blocking_ != Blocking::None) {
     if (event == Event::Escape)
-      CancelSearch();
+      CancelBlocking();
     return true;
   }
 
@@ -694,7 +872,9 @@ bool CSVController::OnTextInputEvent(Event event) {
     input_buffer_.clear();
     UpdateCommandLine();
 
-    if (mode == InputMode::Search) {
+    if (mode == InputMode::Export) {
+      StartExport(pattern);
+    } else if (mode == InputMode::Search) {
       StartSearch(pattern, true, true);
     } else if (pattern.empty()) {
       ApplyFilter(pattern); // clearing never costs anything
@@ -766,6 +946,28 @@ bool CSVController::OnNormalEvent(Event event) {
   if (event == Event::Character('f')) {
     input_mode_ = InputMode::Filter;
     input_buffer_ = model_.filter_pattern();
+    UpdateCommandLine();
+    return true;
+  }
+  if (event == Event::Character('<') || event == Event::Character('>')) {
+    const int step = event == Event::Character('>') ? 4 : -4;
+    view_.WidenColumn(cursor_col_, step * static_cast<int>(ConsumeCount()));
+    view_.EnsureColumnVisible(cursor_col_, TerminalWidth());
+    SetMessage(model_.ColumnName(cursor_col_) + " width " +
+               std::to_string(view_.ColumnWidth(cursor_col_)));
+    return true;
+  }
+  if (event == Event::Character('=')) {
+    view_.FitColumnToScreen(cursor_col_, Terminal::Size().dimy);
+    view_.EnsureColumnVisible(cursor_col_, TerminalWidth());
+    SetMessage(model_.ColumnName(cursor_col_) + " fitted to " +
+               std::to_string(view_.ColumnWidth(cursor_col_)));
+    return true;
+  }
+
+  if (event == Event::Character('w')) {
+    input_mode_ = InputMode::Export;
+    input_buffer_.clear();
     UpdateCommandLine();
     return true;
   }

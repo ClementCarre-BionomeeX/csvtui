@@ -69,6 +69,7 @@ if(CSVTUI_BUILD_TESTS)
     tests/test_sortrun.cpp
     tests/test_cache.cpp
     tests/test_view.cpp
+    tests/test_export.cpp
   )
   target_link_libraries(csvtui_tests PRIVATE csvtui_core)
   target_include_directories(csvtui_tests PRIVATE tests)

@@ -122,4 +122,10 @@ size_t FindLastBefore(const std::string &haystack, const std::string &needle,
 // Byte index of the start of the UTF-8 character preceding `index`.
 size_t PrevCharBoundary(const std::string &s, size_t index);
 
+// Appends `value` to `out` as a CSV field, quoting it only when it has to be:
+// when it holds the delimiter, a quote, a newline or a carriage return. A
+// value written this way reads back through SplitRecord unchanged, which is
+// the only property that matters here.
+void AppendQuoted(std::string &out, const std::string &value, char delimiter);
+
 } // namespace csv

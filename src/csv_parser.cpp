@@ -70,6 +70,29 @@ void ExtractField(const std::string &record, char delimiter, size_t index,
     out.clear();
 }
 
+void AppendQuoted(std::string &out, const std::string &value, char delimiter) {
+  bool needs_quotes = false;
+  for (char c : value) {
+    if (c == delimiter || c == '"' || c == '\n' || c == '\r') {
+      needs_quotes = true;
+      break;
+    }
+  }
+
+  if (!needs_quotes) {
+    out += value;
+    return;
+  }
+
+  out.push_back('"');
+  for (char c : value) {
+    if (c == '"')
+      out.push_back('"'); // doubled, per RFC 4180
+    out.push_back(c);
+  }
+  out.push_back('"');
+}
+
 bool RecordContains(const std::string &record, char delimiter,
                     const std::string &needle, bool ignore_case,
                     std::string &scratch) {
