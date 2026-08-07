@@ -67,6 +67,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
@@ -87,6 +88,9 @@ jobs:
   fuzz:
     name: libFuzzer
     runs-on: ubuntu-latest
+    # A backstop, not a budget: the steps below bound themselves, and anything
+    # that ignores its own bound should fail fast rather than run all day.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -102,8 +106,11 @@ jobs:
       - name: Build
         run: cmake --build build-fuzz -j --target fuzz_parser
 
+      # -runs=0 replays the corpus and stops. Handing libFuzzer a bare
+      # directory instead makes it fuzz from that corpus indefinitely, which is
+      # how this job once ran for six hours and was killed by the platform.
       - name: Replay the corpus
-        run: ./build-fuzz/fuzz_parser tests/fuzz/corpus
+        run: ./build-fuzz/fuzz_parser tests/fuzz/corpus -runs=0
 
       - name: Fuzz
         run: >
