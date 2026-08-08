@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 — 2026-08-08
+
+The round after the first release: the tool stops being read-only in the one
+way that mattered, and two things it had been quietly hiding come to light.
 
 - **Write the current view to a file** with `w`: the rows the filter and sort
   have left, with the columns not hidden, quoted so it reads back unchanged and
